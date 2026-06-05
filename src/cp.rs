@@ -114,15 +114,21 @@ async fn upload(
     let url = presigned.uri();
 
     // 3. ECS Exec: download from presigned URL inside container
+    let dest = if remote_path.is_empty() {
+        format!("/tmp/{}", std::path::Path::new(local_path).file_name().unwrap_or_default().to_string_lossy())
+    } else {
+        remote_path.to_string()
+    };
     let cmd = format!(
-        "sh -c \"curl -sf -o '{remote_path}' '{url}' || wget -q -O '{remote_path}' '{url}'\""
+        "sh -c 'curl -sf -o \"{}\" \"{}\" || wget -q -O \"{}\" \"{}\"'",
+        dest, url, dest, url
     );
-    eprintln!("⬇ Downloading inside container to {remote_path}...");
+    eprintln!("⬇ Downloading inside container to {dest}...");
     ecs_exec(cluster, task, container, &cmd)?;
 
     // 4. Cleanup S3
     s3.delete_object().bucket(bucket).key(key).send().await?;
-    eprintln!("✓ Copied {local_path} → {cluster}/{task}/{container}:{remote_path}");
+    eprintln!("✓ Copied {local_path} → {cluster}/{task}/{container}:{dest}");
     Ok(())
 }
 
@@ -149,7 +155,8 @@ async fn download(
 
     // 2. ECS Exec: upload from container to S3 via presigned PUT
     let cmd = format!(
-        "sh -c \"curl -sf -T '{remote_path}' '{url}' || wget --method=PUT --body-file='{remote_path}' '{url}'\""
+        "sh -c 'curl -sf -T \"{}\" \"{}\" || wget --method=PUT --body-file=\"{}\" \"{}\"'",
+        remote_path, url, remote_path, url
     );
     eprintln!("⬆ Uploading from container {remote_path} to S3...");
     ecs_exec(cluster, task, container, &cmd)?;
