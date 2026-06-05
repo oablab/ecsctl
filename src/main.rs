@@ -43,11 +43,8 @@ enum Command {
         /// alias or cluster/task/container
         target: String,
         /// Command to run (default: /bin/sh)
-        #[arg(long, short)]
-        command: Option<String>,
-        /// Interactive mode
-        #[arg(long, short)]
-        interactive: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
     /// Manage aliases for cluster/service/container targets
     Alias {
@@ -85,11 +82,15 @@ async fn main() -> anyhow::Result<()> {
         Command::Exec {
             target,
             command,
-            interactive,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let resolved = alias::resolve(&aws_config, &target).await?;
-            exec::run(&aws_config, &resolved, command.as_deref(), interactive).await
+            let cmd = if command.is_empty() {
+                None
+            } else {
+                Some(command.join(" "))
+            };
+            exec::run(&aws_config, &resolved, cmd.as_deref()).await
         }
         Command::Cp {
             src,

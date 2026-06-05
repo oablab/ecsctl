@@ -16,7 +16,6 @@ pub async fn run(
     config: &aws_config::SdkConfig,
     target: &str,
     command: Option<&str>,
-    _interactive: bool,
 ) -> Result<()> {
     let (cluster, task, container) = parse_target(target)?;
     let cmd = command.unwrap_or("/bin/sh");
