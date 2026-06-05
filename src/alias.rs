@@ -104,6 +104,11 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
         let cpu = task.cpu().unwrap_or("?");
         let memory = task.memory().unwrap_or("?");
         let task_def_arn = task.task_definition_arn().unwrap_or("?");
+        let capacity = task.capacity_provider_name().unwrap_or("?");
+        let platform = task.platform_version().unwrap_or("?");
+        let az = task.availability_zone().unwrap_or("?");
+        let connectivity = task.connectivity().map(|c| c.as_str()).unwrap_or("?");
+        let exec_enabled = task.enable_execute_command();
 
         // Fetch task definition for env vars
         let task_def = ecs
@@ -119,6 +124,11 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
         println!("  Health:     {health}");
         println!("  Started:    {started}");
         println!("  CPU/Memory: {cpu} / {memory}");
+        println!("  Capacity:   {capacity}");
+        println!("  Platform:   {platform}");
+        println!("  AZ:         {az}");
+        println!("  Connected:  {connectivity}");
+        println!("  ExecEnabled:{exec_enabled}");
         println!("  TaskDef:    {task_def_arn}");
         println!("  Containers:");
         for c in task.containers() {
