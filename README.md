@@ -6,6 +6,8 @@ A wrapper around ECS Exec that gives you a kubectl-like experience on Amazon ECS
 ecsctl exec chaodu bash          # like: kubectl exec -it pod -- bash
 ecsctl cp file.txt chaodu:/tmp/  # like: kubectl cp file.txt pod:/tmp/
 ecsctl sync ./app chaodu:/opt/   # tar + upload + extract
+ecsctl get chaodu                # like: kubectl describe pod
+ecsctl log chaodu -f             # like: kubectl logs -f pod
 ```
 
 ## Commands
@@ -16,7 +18,6 @@ ecsctl sync ./app chaodu:/opt/   # tar + upload + extract
 ecsctl exec chaodu                       # /bin/sh (default)
 ecsctl exec chaodu bash                  # bash
 ecsctl exec chaodu -- cat /etc/hosts     # command with args
-ecsctl exec chaodu echo hello world      # also works
 ```
 
 ### `ecsctl cp` — copy files to/from a container
@@ -30,6 +31,26 @@ ecsctl cp chaodu:/tmp/output.log ./output.log    # download
 
 ```bash
 ecsctl sync ./my-app chaodu:/opt/app
+```
+
+### `ecsctl get` — describe a task
+
+```bash
+ecsctl get chaodu              # human-readable
+ecsctl get chaodu --json       # JSON (pipe to jq)
+ecsctl get chaodu --json | jq '.tasks[0].capacity'     # "FARGATE_SPOT"
+ecsctl get chaodu --json | jq '.tasks[0].containers[1].env'
+```
+
+Output includes: status, health, CPU/memory, arch (X86_64/ARM64), capacity provider (FARGATE/FARGATE_SPOT), AZ, connectivity, exec status, env vars (secrets masked), and last 10 log lines.
+
+### `ecsctl log` — view logs
+
+```bash
+ecsctl log chaodu              # last 20 lines
+ecsctl log chaodu -n 50        # last 50 lines
+ecsctl log chaodu -f           # live tail (Ctrl+C to stop)
+ecsctl log chaodu -f -n 10     # start with last 10, then follow
 ```
 
 ### `ecsctl alias` — manage target aliases
@@ -83,14 +104,6 @@ myapp = "my-cluster/my-service"
 
 Priority: CLI flags > config.toml > defaults.
 
-## Requirements
-
-- AWS credentials configured
-- ECS Exec enabled on the service (`EnableExecuteCommand: true`)
-- Task role with SSM permissions
-- Container must have `curl` or `wget` (+ `tar` for sync)
-- [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed locally
-
 ## Shell Aliases
 
 ```bash
@@ -100,6 +113,14 @@ ecsh() { ecsctl exec "$1" bash; }
 # Usage
 ecsh chaodu       # bash into chaodu's newest running task
 ```
+
+## Requirements
+
+- AWS credentials configured
+- ECS Exec enabled on the service (`EnableExecuteCommand: true`)
+- Task role with SSM permissions
+- Container must have `curl` or `wget` (+ `tar` for sync)
+- [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed locally
 
 ## Install
 
