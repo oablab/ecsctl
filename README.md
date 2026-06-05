@@ -21,24 +21,53 @@ ecsctl cp myfile.txt my-cluster/TASK_ID/my-container:/tmp/myfile.txt
 ecsctl cp my-cluster/TASK_ID/my-container:/tmp/output.log ./output.log
 ```
 
-## How `cp` works
+### `ecsctl sync` — sync a local directory to a container
+
+```bash
+ecsctl sync ./my-app my-cluster/TASK_ID/my-container:/opt/app
+```
+
+Behind the scenes:
+```
+./my-app/ → tar czf → S3 upload → presigned GET URL → ECS Exec: wget/curl | tar xzf -C /opt/app → S3 cleanup
+```
+
+## How it works
 
 ```
-local file → S3 (presigned PUT) → ECS Exec runs wget/curl inside container → done
-container  → ECS Exec runs curl PUT to S3 → S3 (presigned GET) → local file
+┌──────────┐       ┌────────┐       ┌─────────────────────────────┐
+│  Local   │──tar──▶│   S3   │       │  ECS Fargate Container      │
+│  Machine │       │ Bucket │       │                             │
+│          │       │        │──presigned URL──▶ wget/curl │ tar x │
+│          │       │(delete)│◀──────│                             │
+└──────────┘       └────────┘       └─────────────────────────────┘
 ```
 
-No AWS CLI needed inside the container — only `curl` or `wget`.
+No AWS CLI needed inside the container — only `curl`/`wget` (+ `tar` for sync).
 
-Uses a staging S3 bucket (`ecsctl-staging-{account_id}`, auto-created on first use).
-Objects are deleted immediately after transfer.
+## Configuration
+
+`~/.ecsctl/config.toml`:
+
+```toml
+# S3 bucket for staging (auto-created as ecsctl-staging-{account_id} if unset)
+# bucket = "my-custom-bucket"
+
+# Presigned URL expiry in seconds (default: 60)
+presign_expiry = 60
+
+# Default cluster name
+# cluster = "my-cluster"
+```
+
+Priority: CLI flags > config.toml > defaults.
 
 ## Requirements
 
 - AWS credentials configured
 - ECS Exec enabled on the service (`EnableExecuteCommand: true`)
 - Task role with SSM permissions
-- Container must have `curl` or `wget` (most images do)
+- Container must have `curl` or `wget` (+ `tar` for sync)
 - [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) for interactive exec
 
 ## Install
