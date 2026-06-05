@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use aws_sdk_ecs::Client as EcsClient;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_sts::Client as StsClient;
+use std::process::Command;
 use std::time::Duration;
 
 /// Parse "cluster/task/container:/remote/path" into parts
@@ -37,7 +37,6 @@ pub async fn run(
 ) -> Result<()> {
     let (cluster, task, container, remote_path) = parse_remote(remote)?;
     let s3 = S3Client::new(config);
-    let ecs = EcsClient::new(config);
     let staging_bucket = get_staging_bucket(config, bucket).await?;
     let key = format!("ecsctl/{}.tar.gz", uuid::Uuid::new_v4());
     let expiry = Duration::from_secs(presign_expiry_secs);
@@ -72,15 +71,21 @@ pub async fn run(
     );
     eprintln!("⬇ Extracting to {remote_path} inside container...");
 
-    ecs.execute_command()
-        .cluster(cluster)
-        .task(task)
-        .container(container)
-        .interactive(false)
-        .command(&cmd)
-        .send()
-        .await
-        .context("ECS ExecuteCommand failed")?;
+    let status = Command::new("aws")
+        .args([
+            "ecs", "execute-command",
+            "--cluster", cluster,
+            "--task", task,
+            "--container", container,
+            "--interactive",
+            "--command", &cmd,
+        ])
+        .status()
+        .context("failed to run aws ecs execute-command")?;
+
+    if !status.success() {
+        anyhow::bail!("ecs exec failed with status {}", status);
+    }
 
     // 5. Cleanup
     s3.delete_object().bucket(&staging_bucket).key(&key).send().await?;
