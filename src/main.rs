@@ -2,6 +2,7 @@ mod alias;
 mod apply;
 mod config;
 mod cp;
+mod delete;
 mod exec;
 mod logs;
 mod sync;
@@ -54,6 +55,11 @@ enum Command {
         #[arg(short = 'f', long = "file")]
         file: String,
     },
+    /// Delete a service
+    Delete {
+        /// Alias name or service name
+        name: String,
+    },
     /// Manage aliases for cluster/service/container targets
     Alias {
         #[command(subcommand)]
@@ -104,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Apply { file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             apply::run(&aws_config, &file).await
+        }
+        Command::Delete { name } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            delete::run(&aws_config, &name).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
