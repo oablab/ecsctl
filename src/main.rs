@@ -56,6 +56,9 @@ enum Command {
     Get {
         /// Alias name
         name: String,
+        /// Output as JSON (pipe to jq for field selection)
+        #[arg(long)]
+        json: bool,
     },
     /// Show recent logs for an alias
     Log {
@@ -96,9 +99,9 @@ async fn main() -> anyhow::Result<()> {
             AliasAction::Rm { name } => alias::remove(&name).await,
             AliasAction::Ls => alias::list().await,
         },
-        Command::Get { name } => {
+        Command::Get { name, json } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            alias::describe(&aws_config, &name).await
+            alias::describe(&aws_config, &name, json).await
         }
         Command::Log { name, lines, follow } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;

@@ -36,7 +36,7 @@ pub async fn list() -> Result<()> {
 }
 
 /// Describe the resolved task for an alias
-pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Result<()> {
+pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, json_output: bool) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -78,6 +78,10 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
         .send()
         .await
         .context("DescribeTasks failed")?;
+
+    if json_output {
+        return print_json(config, &ecs, alias_name, &target, cluster, service, &desc).await;
+    }
 
     println!("Alias:   {alias_name}");
     println!("Target:  {target}");
@@ -226,6 +230,97 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
     Ok(())
 }
 
+
+async fn print_json(
+    config: &aws_config::SdkConfig,
+    ecs: &EcsClient,
+    alias_name: &str,
+    target: &str,
+    cluster: &str,
+    service: &str,
+    desc: &aws_sdk_ecs::operation::describe_tasks::DescribeTasksOutput,
+) -> Result<()> {
+    let mut tasks_json = Vec::new();
+
+    for task in desc.tasks() {
+        let task_id = task.task_arn().unwrap_or("?").rsplit('/').next().unwrap_or("?");
+        let task_def_arn = task.task_definition_arn().unwrap_or("?");
+
+        let task_def = ecs
+            .describe_task_definition()
+            .task_definition(task_def_arn)
+            .send()
+            .await
+            .ok()
+            .and_then(|r| r.task_definition);
+
+        let arch = task_def.as_ref()
+            .and_then(|td| td.runtime_platform().cloned())
+            .and_then(|rp| rp.cpu_architecture().cloned())
+            .map(|a| a.as_str().to_string())
+            .unwrap_or_else(|| "X86_64".to_string());
+
+        let mut containers_json = Vec::new();
+        for c in task.containers() {
+            let name = c.name().unwrap_or("?");
+            let is_sidecar = name.starts_with("ecs-service-connect-");
+            let mut cj = serde_json::json!({
+                "name": name,
+                "status": c.last_status().unwrap_or("?"),
+                "image": c.image().unwrap_or("?"),
+                "sidecar": is_sidecar,
+            });
+
+            if !is_sidecar {
+                if let Some(ref td) = task_def {
+                    if let Some(cd) = td.container_definitions().iter().find(|cd| cd.name() == Some(name)) {
+                        let mut env = serde_json::Map::new();
+                        for kv in cd.environment() {
+                            let k = kv.name().unwrap_or("?");
+                            let v = kv.value().unwrap_or("");
+                            env.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                        }
+                        let mut secrets = serde_json::Map::new();
+                        for s in cd.secrets() {
+                            secrets.insert(s.name().to_string(), serde_json::Value::String(s.value_from().to_string()));
+                        }
+                        cj["env"] = serde_json::Value::Object(env);
+                        cj["secrets"] = serde_json::Value::Object(secrets);
+                    }
+                }
+            }
+            containers_json.push(cj);
+        }
+
+        tasks_json.push(serde_json::json!({
+            "task_id": task_id,
+            "status": task.last_status().unwrap_or("?"),
+            "health": task.health_status().map(|h| h.as_str()).unwrap_or("UNKNOWN"),
+            "started": task.started_at().map(|t| t.fmt(aws_sdk_ecs::primitives::DateTimeFormat::DateTime).unwrap_or_default()).unwrap_or_default(),
+            "cpu": task.cpu().unwrap_or("?"),
+            "memory": task.memory().unwrap_or("?"),
+            "arch": arch,
+            "capacity": task.capacity_provider_name().unwrap_or("?"),
+            "platform_version": task.platform_version().unwrap_or("?"),
+            "az": task.availability_zone().unwrap_or("?"),
+            "connectivity": task.connectivity().map(|c| c.as_str()).unwrap_or("?"),
+            "exec_enabled": task.enable_execute_command(),
+            "task_definition": task_def_arn,
+            "containers": containers_json,
+        }));
+    }
+
+    let output = serde_json::json!({
+        "alias": alias_name,
+        "target": target,
+        "cluster": cluster,
+        "service": service,
+        "tasks": tasks_json,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
 /// Resolve an alias to "cluster/task_id/container" (ready for exec/cp/sync).
 /// Alias format: cluster/service[/container[/task_id]]
 /// - 2 parts (cluster/service): auto-resolve container + newest task
