@@ -1,3 +1,4 @@
+mod alias;
 mod config;
 mod cp;
 mod exec;
@@ -17,14 +18,12 @@ struct Cli {
 enum Command {
     /// Copy files to/from an ECS Fargate container via S3 presigned URLs
     Cp {
-        /// Source (local path or cluster/task/container:/remote/path)
+        /// Source (local path or alias:/path or cluster/task/container:/path)
         src: String,
-        /// Destination (local path or cluster/task/container:/remote/path)
+        /// Destination (local path or alias:/path or cluster/task/container:/path)
         dst: String,
-        /// S3 bucket for staging (overrides config)
         #[arg(long)]
         bucket: Option<String>,
-        /// Presigned URL expiry in seconds (overrides config)
         #[arg(long)]
         presign_expiry: Option<u64>,
     },
@@ -32,43 +31,78 @@ enum Command {
     Sync {
         /// Local directory path
         src: String,
-        /// Remote target: cluster/task/container:/remote/path
+        /// Remote target: alias:/path or cluster/task/container:/path
         dst: String,
-        /// S3 bucket for staging (overrides config)
         #[arg(long)]
         bucket: Option<String>,
-        /// Presigned URL expiry in seconds (overrides config)
         #[arg(long)]
         presign_expiry: Option<u64>,
     },
     /// Execute a command in an ECS Fargate container
     Exec {
-        /// cluster/task/container
+        /// alias or cluster/task/container
         target: String,
-        /// Command to run
+        /// Command to run (default: /bin/sh)
         #[arg(long, short)]
         command: Option<String>,
         /// Interactive mode
         #[arg(long, short)]
         interactive: bool,
     },
+    /// Manage aliases for cluster/service/container targets
+    Alias {
+        #[command(subcommand)]
+        action: AliasAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AliasAction {
+    /// Set an alias: ecsctl alias set cluster/service/container name
+    Set {
+        /// Target: cluster/service/container[/task_id]
+        target: String,
+        /// Alias name
+        name: String,
+    },
+    /// Remove an alias
+    Rm { name: String },
+    /// List all aliases
+    Ls,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load()?;
-    let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
 
     match cli.command {
+        Command::Alias { action } => match action {
+            AliasAction::Set { target, name } => alias::set(&name, &target).await,
+            AliasAction::Rm { name } => alias::remove(&name).await,
+            AliasAction::Ls => alias::list().await,
+        },
+        Command::Exec {
+            target,
+            command,
+            interactive,
+        } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let resolved = alias::resolve(&aws_config, &target).await?;
+            exec::run(&aws_config, &resolved, command.as_deref(), interactive).await
+        }
         Command::Cp {
             src,
             dst,
             bucket,
             presign_expiry,
         } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
+            // Resolve aliases in remote paths (the one with ':')
+            let src = resolve_remote_alias(&aws_config, &src).await?;
+            let dst = resolve_remote_alias(&aws_config, &dst).await?;
             cp::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
         }
         Command::Sync {
@@ -77,14 +111,27 @@ async fn main() -> anyhow::Result<()> {
             bucket,
             presign_expiry,
         } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
+            let dst = resolve_remote_alias(&aws_config, &dst).await?;
             sync::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
         }
-        Command::Exec {
-            target,
-            command,
-            interactive,
-        } => exec::run(&aws_config, &target, command.as_deref(), interactive).await,
     }
+}
+
+/// If a string is "alias:/path", resolve the alias part to cluster/task/container:/path
+async fn resolve_remote_alias(config: &aws_config::SdkConfig, s: &str) -> anyhow::Result<String> {
+    if let Some(colon_pos) = s.find(':') {
+        let prefix = &s[..colon_pos];
+        let path = &s[colon_pos..]; // includes the ':'
+        // If prefix doesn't contain '/' it might be an alias
+        if !prefix.contains('/') {
+            let resolved = alias::resolve(config, prefix).await?;
+            if resolved != prefix {
+                return Ok(format!("{resolved}{path}"));
+            }
+        }
+    }
+    Ok(s.to_string())
 }

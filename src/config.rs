@@ -11,6 +11,9 @@ pub struct Config {
     pub presign_expiry: Option<u64>,
     /// Default cluster name
     pub cluster: Option<String>,
+    /// Aliases: name -> "cluster/service/container[/task_id]"
+    #[serde(default)]
+    pub aliases: std::collections::HashMap<String, String>,
 }
 
 impl Config {
@@ -33,5 +36,15 @@ impl Config {
 
     pub fn presign_expiry_secs(&self) -> u64 {
         self.presign_expiry.unwrap_or(60)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(&path, content)?;
+        Ok(())
     }
 }
