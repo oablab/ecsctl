@@ -114,12 +114,17 @@ async fn find_newest_task_with_container(config: &aws_config::SdkConfig, cluster
     let arn = newest.task_arn().context("task has no ARN")?;
     let task_id = arn.rsplit('/').next().context("cannot parse task ID from ARN")?;
 
-    // Get first container name from the task's containers
+    // Get the app container name (skip ECS Service Connect sidecars)
     let container_name = newest
         .containers()
-        .first()
+        .iter()
+        .filter(|c| {
+            let name = c.name().unwrap_or_default();
+            !name.starts_with("ecs-service-connect-")
+        })
+        .next()
         .and_then(|c| c.name())
-        .context("task has no containers")?
+        .context("task has no app containers")?
         .to_string();
 
     Ok((task_id.to_string(), container_name))

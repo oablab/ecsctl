@@ -16,54 +16,32 @@ pub async fn run(
     config: &aws_config::SdkConfig,
     target: &str,
     command: Option<&str>,
-    interactive: bool,
+    _interactive: bool,
 ) -> Result<()> {
     let (cluster, task, container) = parse_target(target)?;
     let cmd = command.unwrap_or("/bin/sh");
 
-    if interactive {
-        // For interactive sessions, shell out to aws CLI (SSM plugin handles the WebSocket)
-        let status = ProcessCommand::new("aws")
-            .args([
-                "ecs",
-                "execute-command",
-                "--cluster",
-                cluster,
-                "--task",
-                task,
-                "--container",
-                container,
-                "--interactive",
-                "--command",
-                cmd,
-            ])
-            .status()
-            .context("failed to run aws ecs execute-command")?;
+    // ECS Exec only supports interactive mode — always shell out to aws CLI
+    // (SSM plugin handles the WebSocket session)
+    let status = ProcessCommand::new("aws")
+        .args([
+            "ecs",
+            "execute-command",
+            "--cluster",
+            cluster,
+            "--task",
+            task,
+            "--container",
+            container,
+            "--interactive",
+            "--command",
+            cmd,
+        ])
+        .status()
+        .context("failed to run aws ecs execute-command")?;
 
-        if !status.success() {
-            anyhow::bail!("exec exited with status {}", status);
-        }
-    } else {
-        // Non-interactive: use SDK directly
-        let ecs = EcsClient::new(config);
-        let resp = ecs
-            .execute_command()
-            .cluster(cluster)
-            .task(task)
-            .container(container)
-            .interactive(false)
-            .command(cmd)
-            .send()
-            .await
-            .context("ECS ExecuteCommand failed")?;
-
-        if let Some(session) = resp.session() {
-            eprintln!(
-                "Session: {} (stream: {})",
-                session.session_id().unwrap_or("?"),
-                session.stream_url().unwrap_or("?")
-            );
-        }
+    if !status.success() {
+        anyhow::bail!("exec exited with status {}", status);
     }
 
     Ok(())
