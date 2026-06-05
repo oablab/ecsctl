@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use aws_sdk_ecs::Client as EcsClient;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceSpec {
     pub api_version: Option<String>,
@@ -12,14 +12,14 @@ pub struct ServiceSpec {
     pub spec: Spec,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Metadata {
     pub name: String,
     pub cluster: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Spec {
     pub image: String,

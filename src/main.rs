@@ -4,6 +4,7 @@ mod config;
 mod cp;
 mod delete;
 mod exec;
+mod export;
 mod logs;
 mod restart;
 mod sync;
@@ -69,6 +70,14 @@ enum Command {
         /// Alias name
         name: String,
     },
+    /// Export a running service to a YAML spec file
+    Export {
+        /// Alias name
+        name: String,
+        /// Output file (default: service.yaml)
+        #[arg(short = 'o', long)]
+        output: Option<String>,
+    },
     /// Manage aliases for cluster/service/container targets
     Alias {
         #[command(subcommand)]
@@ -127,6 +136,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Restart { name } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             restart::run(&aws_config, &name).await
+        }
+        Command::Export { name, output } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            export::run(&aws_config, &name, output.as_deref()).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
