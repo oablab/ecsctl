@@ -3,14 +3,33 @@
 A wrapper around ECS Exec that gives you a kubectl-like experience on Amazon ECS.
 
 ```bash
+ecsctl apply -f service.yaml    # like: kubectl apply -f
 ecsctl exec chaodu bash          # like: kubectl exec -it pod -- bash
-ecsctl cp file.txt chaodu:/tmp/  # like: kubectl cp file.txt pod:/tmp/
+ecsctl cp file.txt chaodu:/tmp/  # like: kubectl cp
 ecsctl sync ./app chaodu:/opt/   # tar + upload + extract
 ecsctl get chaodu                # like: kubectl describe pod
-ecsctl log chaodu -f             # like: kubectl logs -f pod
+ecsctl log chaodu -f             # like: kubectl logs -f
+ecsctl delete chaodu             # like: kubectl delete
 ```
 
 ## Commands
+
+### `ecsctl apply` — deploy a service declaratively
+
+```bash
+ecsctl apply -f service.yaml
+```
+
+Registers a task definition and creates/updates the ECS service. Auto-registers an alias.
+
+### `ecsctl delete` — remove a service
+
+```bash
+ecsctl delete chaodu              # by alias
+ecsctl delete -f service.yaml     # by spec file
+```
+
+Scales to 0, deletes the service, removes the alias.
 
 ### `ecsctl exec` — execute a command in a container
 
@@ -38,11 +57,10 @@ ecsctl sync ./my-app chaodu:/opt/app
 ```bash
 ecsctl get chaodu              # human-readable
 ecsctl get chaodu --json       # JSON (pipe to jq)
-ecsctl get chaodu --json | jq '.tasks[0].capacity'     # "FARGATE_SPOT"
-ecsctl get chaodu --json | jq '.tasks[0].containers[1].env'
+ecsctl get chaodu --json | jq '.tasks[0].capacity'
 ```
 
-Output includes: status, health, CPU/memory, arch (X86_64/ARM64), capacity provider (FARGATE/FARGATE_SPOT), AZ, connectivity, exec status, env vars (secrets masked), and last 10 log lines.
+Output includes: status, health, CPU/memory, arch, capacity provider, AZ, connectivity, exec status, env vars (secrets masked), and recent logs.
 
 ### `ecsctl log` — view logs
 
@@ -50,26 +68,47 @@ Output includes: status, health, CPU/memory, arch (X86_64/ARM64), capacity provi
 ecsctl log chaodu              # last 20 lines
 ecsctl log chaodu -n 50        # last 50 lines
 ecsctl log chaodu -f           # live tail (Ctrl+C to stop)
-ecsctl log chaodu -f -n 10     # start with last 10, then follow
 ```
 
 ### `ecsctl alias` — manage target aliases
 
 ```bash
-ecsctl alias set my-cluster/my-service myapp         # auto-resolve task + container
-ecsctl alias set my-cluster/my-service/app myapp     # auto-resolve task only
-ecsctl alias set my-cluster/my-service/app/ID myapp  # fully pinned
-ecsctl alias ls                                       # list all
-ecsctl alias rm myapp                                 # remove
+ecsctl alias set my-cluster/my-service myapp
+ecsctl alias ls
+ecsctl alias rm myapp
 ```
 
-Alias format: `cluster/service[/container[/task_id]]`
+Alias format: `cluster/service[/container[/task_id]]`. Omitted parts are auto-resolved at runtime.
 
-| Parts | Example | Behavior |
-|-------|---------|----------|
-| 2 | `openab/openab-chaodu` | Auto-resolve newest RUNNING task + container name |
-| 3 | `openab/openab-chaodu/app` | Auto-resolve newest RUNNING task |
-| 4 | `openab/openab-chaodu/app/abc123` | Fully pinned |
+## Service Spec
+
+```yaml
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: my-app
+  cluster: my-cluster
+spec:
+  image: nginx:latest
+  cpu: "256"
+  memory: "512"
+  arch: X86_64              # or ARM64
+  capacity: FARGATE_SPOT    # or FARGATE
+  desiredCount: 1
+  execEnabled: true
+  port: 80
+  containerName: app
+  executionRoleArn: arn:aws:iam::...:role/ecsTaskExecutionRole
+  taskRoleArn: arn:aws:iam::...:role/my-task-role
+  subnets: [subnet-aaa, subnet-bbb]
+  securityGroups: [sg-xxx]
+  assignPublicIp: false
+  logGroup: /ecs/my-app
+  env:
+    APP_ENV: production
+  secrets:
+    DB_PASSWORD: arn:aws:secretsmanager:...:secret:my-db
+```
 
 ## How `cp` and `sync` work
 
@@ -95,14 +134,9 @@ No AWS CLI needed inside the container — only `curl`/`wget` (+ `tar` for sync)
 # Presigned URL expiry in seconds (default: 60)
 presign_expiry = 60
 
-# Default cluster name
-# cluster = "my-cluster"
-
 [aliases]
 myapp = "my-cluster/my-service"
 ```
-
-Priority: CLI flags > config.toml > defaults.
 
 ## Shell Aliases
 
@@ -111,7 +145,7 @@ Priority: CLI flags > config.toml > defaults.
 ecsh() { ecsctl exec "$1" bash; }
 
 # Usage
-ecsh chaodu       # bash into chaodu's newest running task
+ecsh chaodu
 ```
 
 ## Requirements
