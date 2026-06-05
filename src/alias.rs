@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use aws_sdk_ecs::Client as EcsClient;
+use aws_sdk_cloudwatchlogs::Client as LogsClient;
 
 use crate::config::Config;
 
@@ -182,6 +183,44 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
             }
         }
         println!();
+
+        // Tail last 10 log lines
+        if let Some(ref td) = task_def {
+            let app_container = td.container_definitions().iter()
+                .find(|cd| !cd.name().unwrap_or_default().starts_with("ecs-service-connect-"));
+            if let Some(cd) = app_container {
+                if let Some(log_config) = cd.log_configuration() {
+                    if log_config.log_driver().as_str() == "awslogs" {
+                        if let Some(opts) = log_config.options() {
+                            if let (Some(group), Some(prefix)) = (opts.get("awslogs-group"), opts.get("awslogs-stream-prefix")) {
+                                let container_name = cd.name().unwrap_or("app");
+                                let stream_name = format!("{prefix}/{container_name}/{task_id}");
+                                let logs = LogsClient::new(config);
+                                if let Ok(resp) = logs
+                                    .get_log_events()
+                                    .log_group_name(group)
+                                    .log_stream_name(&stream_name)
+                                    .limit(10)
+                                    .start_from_head(false)
+                                    .send()
+                                    .await
+                                {
+                                    let events = resp.events();
+                                    if !events.is_empty() {
+                                        println!("  Logs (last {}):", events.len());
+                                        for event in events {
+                                            let msg = event.message().unwrap_or("");
+                                            println!("    {msg}");
+                                        }
+                                        println!();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
