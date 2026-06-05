@@ -115,7 +115,8 @@ async fn upload(
 
     // 3. ECS Exec: download from presigned URL inside container
     let dest = if remote_path.is_empty() {
-        format!("/tmp/{}", std::path::Path::new(local_path).file_name().unwrap_or_default().to_string_lossy())
+        let filename = std::path::Path::new(local_path).file_name().unwrap_or_default().to_string_lossy();
+        format!("$HOME/{filename}")
     } else {
         remote_path.to_string()
     };
