@@ -31,6 +31,14 @@ ecsctl delete -f service.yaml     # by spec file
 
 Scales to 0, deletes the service, removes the alias.
 
+### `ecsctl restart` — force restart a service
+
+```bash
+ecsctl restart chaodu
+```
+
+Triggers a new deployment (rolling replacement of all tasks).
+
 ### `ecsctl exec` — execute a command in a container
 
 ```bash
