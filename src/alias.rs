@@ -110,7 +110,7 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
         let connectivity = task.connectivity().map(|c| c.as_str()).unwrap_or("?");
         let exec_enabled = task.enable_execute_command();
 
-        // Fetch task definition for env vars
+        // Fetch task definition for env vars + arch
         let task_def = ecs
             .describe_task_definition()
             .task_definition(task_def_arn)
@@ -119,11 +119,19 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
             .ok()
             .and_then(|r| r.task_definition);
 
+        // Get runtime platform from task definition
+        let arch = task_def.as_ref()
+            .and_then(|td| td.runtime_platform().cloned())
+            .and_then(|rp| rp.cpu_architecture().cloned())
+            .map(|a| a.as_str().to_string())
+            .unwrap_or_else(|| "X86_64".to_string());
+
         println!("  Task:       {task_id}");
         println!("  Status:     {status}");
         println!("  Health:     {health}");
         println!("  Started:    {started}");
         println!("  CPU/Memory: {cpu} / {memory}");
+        println!("  Arch:       {arch}");
         println!("  Capacity:   {capacity}");
         println!("  Platform:   {platform}");
         println!("  AZ:         {az}");
