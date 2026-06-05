@@ -2,6 +2,7 @@ mod alias;
 mod config;
 mod cp;
 mod exec;
+mod logs;
 mod sync;
 
 use clap::{Parser, Subcommand};
@@ -56,6 +57,14 @@ enum Command {
         /// Alias name
         name: String,
     },
+    /// Show recent logs for an alias
+    Log {
+        /// Alias name
+        name: String,
+        /// Number of lines (default: 20)
+        #[arg(short = 'n', long, default_value = "20")]
+        lines: i32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -87,6 +96,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Get { name } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             alias::describe(&aws_config, &name).await
+        }
+        Command::Log { name, lines } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            logs::run(&aws_config, &name, lines).await
         }
         Command::Exec {
             target,
