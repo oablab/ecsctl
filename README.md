@@ -39,6 +39,15 @@ ecsctl restart chaodu
 
 Triggers a new deployment (rolling replacement of all tasks).
 
+### `ecsctl export` — export a running service to YAML
+
+```bash
+ecsctl export chaodu                  # → service.yaml
+ecsctl export chaodu -o chaodu.yaml   # custom output file
+```
+
+Enables round-trip workflows: export → edit → apply.
+
 ### `ecsctl exec` — execute a command in a container
 
 ```bash
