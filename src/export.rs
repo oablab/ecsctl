@@ -127,8 +127,15 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str
     };
 
     let yaml = serde_yaml::to_string(&spec).context("failed to serialize YAML")?;
-    let out_file = output.unwrap_or("service.yaml");
-    std::fs::write(out_file, &yaml)?;
-    eprintln!("✓ Exported {cluster}/{service} → {out_file}");
+
+    match output {
+        Some(out_file) => {
+            std::fs::write(out_file, &yaml)?;
+            eprintln!("✓ Exported {cluster}/{service} → {out_file}");
+        }
+        None => {
+            print!("{yaml}");
+        }
+    }
     Ok(())
 }

@@ -74,8 +74,8 @@ enum Command {
     Export {
         /// Alias name
         name: String,
-        /// Output file (default: service.yaml)
-        #[arg(short = 'o', long)]
+        /// Output file (default: stdout)
+        #[arg(short = 'f', long = "file")]
         output: Option<String>,
     },
     /// Manage aliases for cluster/service/container targets
