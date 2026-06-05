@@ -51,6 +51,11 @@ enum Command {
         #[command(subcommand)]
         action: AliasAction,
     },
+    /// Describe the resolved task for an alias
+    Get {
+        /// Alias name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -79,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
             AliasAction::Rm { name } => alias::remove(&name).await,
             AliasAction::Ls => alias::list().await,
         },
+        Command::Get { name } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            alias::describe(&aws_config, &name).await
+        }
         Command::Exec {
             target,
             command,

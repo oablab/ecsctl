@@ -34,6 +34,99 @@ pub async fn list() -> Result<()> {
     Ok(())
 }
 
+/// Describe the resolved task for an alias
+pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Result<()> {
+    let cfg = Config::load()?;
+    let target = cfg
+        .aliases
+        .get(alias_name)
+        .context(format!("alias '{alias_name}' not found"))?
+        .clone();
+
+    let parts: Vec<&str> = target.splitn(4, '/').collect();
+    let (cluster, service) = match parts.len() {
+        2 => (parts[0], parts[1]),
+        3 => (parts[0], parts[1]),
+        4 => (parts[0], parts[1]),
+        _ => anyhow::bail!("invalid alias target"),
+    };
+
+    let ecs = EcsClient::new(config);
+
+    let tasks_resp = ecs
+        .list_tasks()
+        .cluster(cluster)
+        .service_name(service)
+        .desired_status(aws_sdk_ecs::types::DesiredStatus::Running)
+        .send()
+        .await
+        .context("ListTasks failed")?;
+
+    let task_arns = tasks_resp.task_arns();
+    if task_arns.is_empty() {
+        println!("Alias:   {alias_name}");
+        println!("Target:  {target}");
+        println!("Status:  No RUNNING tasks");
+        return Ok(());
+    }
+
+    let desc = ecs
+        .describe_tasks()
+        .cluster(cluster)
+        .set_tasks(Some(task_arns.to_vec()))
+        .send()
+        .await
+        .context("DescribeTasks failed")?;
+
+    println!("Alias:   {alias_name}");
+    println!("Target:  {target}");
+    println!("Cluster: {cluster}");
+    println!("Service: {service}");
+    println!("Tasks:   {}", task_arns.len());
+    println!();
+
+    for task in desc.tasks() {
+        let task_id = task
+            .task_arn()
+            .unwrap_or("?")
+            .rsplit('/')
+            .next()
+            .unwrap_or("?");
+        let status = task.last_status().unwrap_or("?");
+        let health = task
+            .health_status()
+            .map(|h| h.as_str())
+            .unwrap_or("UNKNOWN");
+        let started = task
+            .started_at()
+            .map(|t| t.fmt(aws_sdk_ecs::primitives::DateTimeFormat::DateTime).unwrap_or_default())
+            .unwrap_or_else(|| "-".to_string());
+        let cpu = task.cpu().unwrap_or("?");
+        let memory = task.memory().unwrap_or("?");
+
+        println!("  Task:       {task_id}");
+        println!("  Status:     {status}");
+        println!("  Health:     {health}");
+        println!("  Started:    {started}");
+        println!("  CPU/Memory: {cpu} / {memory}");
+        println!("  Containers:");
+        for c in task.containers() {
+            let name = c.name().unwrap_or("?");
+            let c_status = c.last_status().unwrap_or("?");
+            let image = c.image().unwrap_or("?");
+            let sidecar = if name.starts_with("ecs-service-connect-") {
+                " (sidecar)"
+            } else {
+                ""
+            };
+            println!("    - {name}{sidecar}: {c_status} [{image}]");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 /// Resolve an alias to "cluster/task_id/container" (ready for exec/cp/sync).
 /// Alias format: cluster/service[/container[/task_id]]
 /// - 2 parts (cluster/service): auto-resolve container + newest task
