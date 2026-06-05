@@ -1,6 +1,7 @@
 mod config;
 mod cp;
 mod exec;
+mod sync;
 
 use clap::{Parser, Subcommand};
 use config::Config;
@@ -19,6 +20,19 @@ enum Command {
         /// Source (local path or cluster/task/container:/remote/path)
         src: String,
         /// Destination (local path or cluster/task/container:/remote/path)
+        dst: String,
+        /// S3 bucket for staging (overrides config)
+        #[arg(long)]
+        bucket: Option<String>,
+        /// Presigned URL expiry in seconds (overrides config)
+        #[arg(long)]
+        presign_expiry: Option<u64>,
+    },
+    /// Sync a local directory to a container (tar + upload + extract)
+    Sync {
+        /// Local directory path
+        src: String,
+        /// Remote target: cluster/task/container:/remote/path
         dst: String,
         /// S3 bucket for staging (overrides config)
         #[arg(long)]
@@ -56,6 +70,16 @@ async fn main() -> anyhow::Result<()> {
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
             cp::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+        }
+        Command::Sync {
+            src,
+            dst,
+            bucket,
+            presign_expiry,
+        } => {
+            let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
+            let bucket = bucket.or(cfg.bucket);
+            sync::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
         }
         Command::Exec {
             target,
