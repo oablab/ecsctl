@@ -5,7 +5,7 @@ use aws_sdk_ecs::Client as EcsClient;
 use crate::alias;
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32) -> Result<()> {
+pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32, follow: bool) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -76,11 +76,35 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32) -> Resu
     let stream_name = format!("{prefix}/{container_name}/{task_id}");
 
     let logs = LogsClient::new(config);
+
+    if follow {
+        tail_follow(&logs, group, &stream_name, lines).await
+    } else {
+        let resp = logs
+            .get_log_events()
+            .log_group_name(group)
+            .log_stream_name(&stream_name)
+            .limit(lines)
+            .start_from_head(false)
+            .send()
+            .await
+            .context("GetLogEvents failed")?;
+
+        for event in resp.events() {
+            let msg = event.message().unwrap_or("");
+            println!("{msg}");
+        }
+        Ok(())
+    }
+}
+
+async fn tail_follow(logs: &LogsClient, group: &str, stream: &str, initial_lines: i32) -> Result<()> {
+    // Get initial batch
     let resp = logs
         .get_log_events()
         .log_group_name(group)
-        .log_stream_name(&stream_name)
-        .limit(lines)
+        .log_stream_name(stream)
+        .limit(initial_lines)
         .start_from_head(false)
         .send()
         .await
@@ -91,5 +115,29 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32) -> Resu
         println!("{msg}");
     }
 
-    Ok(())
+    // Use the forward token to poll for new events
+    let mut next_token = resp.next_forward_token().map(|s| s.to_string());
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let mut req = logs
+            .get_log_events()
+            .log_group_name(group)
+            .log_stream_name(stream)
+            .start_from_head(true);
+
+        if let Some(ref token) = next_token {
+            req = req.next_token(token);
+        }
+
+        let resp = req.send().await.context("GetLogEvents failed")?;
+
+        for event in resp.events() {
+            let msg = event.message().unwrap_or("");
+            println!("{msg}");
+        }
+
+        next_token = resp.next_forward_token().map(|s| s.to_string());
+    }
 }

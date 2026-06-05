@@ -64,6 +64,9 @@ enum Command {
         /// Number of lines (default: 20)
         #[arg(short = 'n', long, default_value = "20")]
         lines: i32,
+        /// Follow (live tail)
+        #[arg(short = 'f', long)]
+        follow: bool,
     },
 }
 
@@ -97,9 +100,9 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             alias::describe(&aws_config, &name).await
         }
-        Command::Log { name, lines } => {
+        Command::Log { name, lines, follow } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            logs::run(&aws_config, &name, lines).await
+            logs::run(&aws_config, &name, lines, follow).await
         }
         Command::Exec {
             target,
