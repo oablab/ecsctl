@@ -1,0 +1,17 @@
+[package]
+name = "ecsctl"
+version = "0.1.0"
+edition = "2021"
+description = "kubectl-style CLI for AWS ECS Fargate — exec and cp via ECS Exec + S3 presigned URLs"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-ecs = "1"
+aws-sdk-s3 = "1"
+aws-sdk-sts = "1"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
