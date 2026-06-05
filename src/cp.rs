@@ -163,7 +163,13 @@ async fn download(
     ecs_exec(cluster, task, container, &cmd)?;
 
     // 3. Download from S3 to local
-    eprintln!("⬇ Downloading to {local_path}...");
+    let local_dest = if std::path::Path::new(local_path).is_dir() {
+        let filename = std::path::Path::new(remote_path).file_name().unwrap_or_default().to_string_lossy();
+        format!("{}/{}", local_path.trim_end_matches('/'), filename)
+    } else {
+        local_path.to_string()
+    };
+    eprintln!("⬇ Downloading to {local_dest}...");
     let resp = s3
         .get_object()
         .bucket(bucket)
@@ -173,11 +179,11 @@ async fn download(
         .context("S3 GetObject failed")?;
 
     let bytes = resp.body.collect().await?.into_bytes();
-    std::fs::write(local_path, &bytes)?;
+    std::fs::write(&local_dest, &bytes)?;
 
     // 4. Cleanup
     s3.delete_object().bucket(bucket).key(key).send().await?;
-    eprintln!("✓ Copied {cluster}/{task}/{container}:{remote_path} → {local_path}");
+    eprintln!("✓ Copied {cluster}/{task}/{container}:{remote_path} → {local_dest}");
     Ok(())
 }
 
