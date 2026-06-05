@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use config::Config;
 
 #[derive(Parser)]
-#[command(name = "ecsctl", about = "kubectl-style CLI for AWS ECS Fargate")]
+#[command(name = "ecsctl", version, about = "kubectl-style CLI for AWS ECS Fargate")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
