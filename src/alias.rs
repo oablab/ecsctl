@@ -35,7 +35,10 @@ pub async fn list() -> Result<()> {
 }
 
 /// Resolve an alias to "cluster/task_id/container" (ready for exec/cp/sync).
-/// If the alias has no task_id, finds the newest RUNNING task for the service.
+/// Alias format: cluster/service[/container[/task_id]]
+/// - 2 parts (cluster/service): auto-resolve container + newest task
+/// - 3 parts (cluster/service/container): auto-resolve newest task
+/// - 4 parts (cluster/service/container/task_id): fully pinned
 pub async fn resolve(config: &aws_config::SdkConfig, alias_or_target: &str) -> Result<String> {
     let cfg = Config::load()?;
 
@@ -58,12 +61,24 @@ pub async fn resolve(config: &aws_config::SdkConfig, alias_or_target: &str) -> R
             let task_id = find_newest_task(config, cluster, service).await?;
             Ok(format!("{cluster}/{task_id}/{container}"))
         }
-        _ => anyhow::bail!("invalid alias target: '{target}' (expected cluster/service/container[/task_id])"),
+        2 => {
+            // cluster/service — find newest task + resolve container name from task def
+            let (cluster, service) = (parts[0], parts[1]);
+            let (task_id, container) = find_newest_task_with_container(config, cluster, service).await?;
+            Ok(format!("{cluster}/{task_id}/{container}"))
+        }
+        _ => anyhow::bail!("invalid alias target: '{target}' (expected cluster/service[/container[/task_id]])"),
     }
 }
 
 /// Find the newest RUNNING task ARN for a service, return just the task ID
 async fn find_newest_task(config: &aws_config::SdkConfig, cluster: &str, service: &str) -> Result<String> {
+    let (task_id, _) = find_newest_task_with_container(config, cluster, service).await?;
+    Ok(task_id)
+}
+
+/// Find the newest RUNNING task for a service, return (task_id, container_name)
+async fn find_newest_task_with_container(config: &aws_config::SdkConfig, cluster: &str, service: &str) -> Result<(String, String)> {
     let ecs = EcsClient::new(config);
 
     let resp = ecs
@@ -80,7 +95,6 @@ async fn find_newest_task(config: &aws_config::SdkConfig, cluster: &str, service
         anyhow::bail!("no RUNNING tasks found for service '{service}' in cluster '{cluster}'");
     }
 
-    // Describe tasks to find the newest by started_at
     let desc = ecs
         .describe_tasks()
         .cluster(cluster)
@@ -96,8 +110,17 @@ async fn find_newest_task(config: &aws_config::SdkConfig, cluster: &str, service
         .max_by_key(|t| t.started_at())
         .context("no RUNNING tasks found")?;
 
-    // Extract task ID from ARN: arn:aws:ecs:region:account:task/cluster/TASK_ID
+    // Extract task ID from ARN
     let arn = newest.task_arn().context("task has no ARN")?;
     let task_id = arn.rsplit('/').next().context("cannot parse task ID from ARN")?;
-    Ok(task_id.to_string())
+
+    // Get first container name from the task's containers
+    let container_name = newest
+        .containers()
+        .first()
+        .and_then(|c| c.name())
+        .context("task has no containers")?
+        .to_string();
+
+    Ok((task_id.to_string(), container_name))
 }
