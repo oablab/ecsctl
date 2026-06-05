@@ -5,6 +5,7 @@ mod cp;
 mod delete;
 mod exec;
 mod logs;
+mod restart;
 mod sync;
 
 use clap::{Parser, Subcommand};
@@ -63,6 +64,11 @@ enum Command {
         #[arg(short = 'f', long = "file")]
         file: Option<String>,
     },
+    /// Force restart a service (new deployment)
+    Restart {
+        /// Alias name
+        name: String,
+    },
     /// Manage aliases for cluster/service/container targets
     Alias {
         #[command(subcommand)]
@@ -117,6 +123,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Delete { name, file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             delete::run(&aws_config, name.as_deref(), file.as_deref()).await
+        }
+        Command::Restart { name } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            restart::run(&aws_config, &name).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
