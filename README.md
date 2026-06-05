@@ -85,6 +85,16 @@ Priority: CLI flags > config.toml > defaults.
 - Container must have `curl` or `wget` (+ `tar` for sync)
 - [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed locally
 
+## Shell Aliases
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+ecsh() { ecsctl exec "$1" bash; }
+
+# Usage
+ecsh chaodu       # bash into chaodu's newest running task
+```
+
 ## Install
 
 ```bash
