@@ -115,7 +115,7 @@ async fn upload(
 
     // 3. ECS Exec: download from presigned URL inside container
     let cmd = format!(
-        "wget -q -O '{remote_path}' '{url}' 2>/dev/null || curl -sf -o '{remote_path}' '{url}'"
+        "sh -c \"curl -sf -o '{remote_path}' '{url}' || wget -q -O '{remote_path}' '{url}'\""
     );
     eprintln!("⬇ Downloading inside container to {remote_path}...");
     ecs_exec(cluster, task, container, &cmd)?;
@@ -149,7 +149,7 @@ async fn download(
 
     // 2. ECS Exec: upload from container to S3 via presigned PUT
     let cmd = format!(
-        "curl -sf -T '{remote_path}' '{url}' || wget --method=PUT --body-file='{remote_path}' '{url}'"
+        "sh -c \"curl -sf -T '{remote_path}' '{url}' || wget --method=PUT --body-file='{remote_path}' '{url}'\""
     );
     eprintln!("⬆ Uploading from container {remote_path} to S3...");
     ecs_exec(cluster, task, container, &cmd)?;

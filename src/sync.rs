@@ -67,7 +67,7 @@ pub async fn run(
 
     // 4. ECS Exec: download and extract inside container
     let cmd = format!(
-        "mkdir -p '{remote_path}' && (wget -q -O - '{url}' 2>/dev/null || curl -sf '{url}') | tar xzf - -C '{remote_path}'"
+        "sh -c \"mkdir -p '{remote_path}' && (curl -sf '{url}' || wget -q -O - '{url}') | tar xzf - -C '{remote_path}'\""
     );
     eprintln!("⬇ Extracting to {remote_path} inside container...");
 
