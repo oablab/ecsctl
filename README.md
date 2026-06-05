@@ -1,6 +1,12 @@
 # ecsctl
 
-kubectl-style CLI for AWS ECS Fargate.
+A wrapper around ECS Exec that gives you a kubectl-like experience on Amazon ECS.
+
+```bash
+ecsctl exec chaodu bash          # like: kubectl exec -it pod -- bash
+ecsctl cp file.txt chaodu:/tmp/  # like: kubectl cp file.txt pod:/tmp/
+ecsctl sync ./app chaodu:/opt/   # tar + upload + extract
+```
 
 ## Commands
 
