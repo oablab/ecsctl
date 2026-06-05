@@ -5,7 +5,9 @@ use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_sts::Client as StsClient;
 use std::time::Duration;
 
-const PRESIGN_EXPIRY: Duration = Duration::from_secs(300);
+/// Default presigned URL expiry. Must cover: ECS Exec API call (~2s) + SSM session
+/// setup (~3-5s) + command start (~1-2s) + actual file transfer time.
+pub const DEFAULT_PRESIGN_EXPIRY: Duration = Duration::from_secs(60);
 
 /// Parse "cluster/task/container:/remote/path" into parts
 fn parse_remote(s: &str) -> Option<(&str, &str, &str, &str)> {
@@ -58,6 +60,7 @@ pub async fn run(
     src: &str,
     dst: &str,
     bucket: Option<&str>,
+    presign_expiry_secs: u64,
 ) -> Result<()> {
     let s3 = S3Client::new(config);
     let ecs = EcsClient::new(config);
@@ -66,26 +69,27 @@ pub async fn run(
     ensure_bucket(&s3, &staging_bucket, region).await?;
 
     let key = format!("ecsctl/{}.tar.gz", uuid::Uuid::new_v4());
+    let expiry = Duration::from_secs(presign_expiry_secs);
 
     if !is_remote(src) && is_remote(dst) {
         // Upload: local -> container
-        upload(config, &s3, &ecs, src, dst, &staging_bucket, &key).await
+        upload(&s3, &ecs, src, dst, &staging_bucket, &key, expiry).await
     } else if is_remote(src) && !is_remote(dst) {
         // Download: container -> local
-        download(config, &s3, &ecs, src, dst, &staging_bucket, &key).await
+        download(&s3, &ecs, src, dst, &staging_bucket, &key, expiry).await
     } else {
         bail!("exactly one of src/dst must be a remote path (cluster/task/container:/path)")
     }
 }
 
 async fn upload(
-    _config: &aws_config::SdkConfig,
     s3: &S3Client,
     ecs: &EcsClient,
     local_path: &str,
     remote: &str,
     bucket: &str,
     key: &str,
+    expiry: Duration,
 ) -> Result<()> {
     let (cluster, task, container, remote_path) =
         parse_remote(remote).context("invalid remote path")?;
@@ -108,7 +112,7 @@ async fn upload(
         .get_object()
         .bucket(bucket)
         .key(key)
-        .presigned(PresigningConfig::expires_in(PRESIGN_EXPIRY)?)
+        .presigned(PresigningConfig::expires_in(expiry)?)
         .await
         .context("failed to generate presigned URL")?;
     let url = presigned.uri();
@@ -141,13 +145,13 @@ async fn upload(
 }
 
 async fn download(
-    _config: &aws_config::SdkConfig,
     s3: &S3Client,
     ecs: &EcsClient,
     remote: &str,
     local_path: &str,
     bucket: &str,
     key: &str,
+    expiry: Duration,
 ) -> Result<()> {
     let (cluster, task, container, remote_path) =
         parse_remote(remote).context("invalid remote path")?;
@@ -157,7 +161,7 @@ async fn download(
         .put_object()
         .bucket(bucket)
         .key(key)
-        .presigned(PresigningConfig::expires_in(PRESIGN_EXPIRY)?)
+        .presigned(PresigningConfig::expires_in(expiry)?)
         .await
         .context("failed to generate presigned URL")?;
     let url = presigned.uri();

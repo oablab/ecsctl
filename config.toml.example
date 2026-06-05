@@ -1,0 +1,11 @@
+# ~/.ecsctl/config.toml
+
+# S3 bucket for staging file transfers (auto-created if not set)
+# bucket = "my-custom-staging-bucket"
+
+# Presigned URL expiry in seconds (default: 60)
+# Must cover ECS Exec setup time (~5-10s) + file transfer time
+presign_expiry = 60
+
+# Default cluster name (optional, avoids typing it every time)
+# cluster = "my-cluster"
