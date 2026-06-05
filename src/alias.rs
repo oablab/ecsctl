@@ -103,12 +103,23 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
             .unwrap_or_else(|| "-".to_string());
         let cpu = task.cpu().unwrap_or("?");
         let memory = task.memory().unwrap_or("?");
+        let task_def_arn = task.task_definition_arn().unwrap_or("?");
+
+        // Fetch task definition for env vars
+        let task_def = ecs
+            .describe_task_definition()
+            .task_definition(task_def_arn)
+            .send()
+            .await
+            .ok()
+            .and_then(|r| r.task_definition);
 
         println!("  Task:       {task_id}");
         println!("  Status:     {status}");
         println!("  Health:     {health}");
         println!("  Started:    {started}");
         println!("  CPU/Memory: {cpu} / {memory}");
+        println!("  TaskDef:    {task_def_arn}");
         println!("  Containers:");
         for c in task.containers() {
             let name = c.name().unwrap_or("?");
@@ -120,6 +131,37 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str) -> Resul
                 ""
             };
             println!("    - {name}{sidecar}: {c_status} [{image}]");
+
+            // Show env vars from task definition
+            if !name.starts_with("ecs-service-connect-") {
+                if let Some(ref td) = task_def {
+                    if let Some(container_def) = td.container_definitions().iter().find(|cd| cd.name() == Some(name)) {
+                        let env = container_def.environment();
+                        let secrets = container_def.secrets();
+                        if !env.is_empty() || !secrets.is_empty() {
+                            println!("      Env:");
+                            for kv in env {
+                                let k = kv.name().unwrap_or("?");
+                                let v = kv.value().unwrap_or("");
+                                println!("        {k}={v}");
+                            }
+                            for s in secrets {
+                                let k = s.name();
+                                let from = s.value_from();
+                                // Shorten ARN for display
+                                let source = if from.contains(":secretsmanager:") {
+                                    "secretsmanager"
+                                } else if from.contains(":ssm:") {
+                                    "ssm"
+                                } else {
+                                    "secret"
+                                };
+                                println!("        {k}=*** (from {source})");
+                            }
+                        }
+                    }
+                }
+            }
         }
         println!();
     }
