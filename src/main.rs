@@ -1,4 +1,5 @@
 mod alias;
+mod apply;
 mod config;
 mod cp;
 mod exec;
@@ -47,6 +48,12 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Apply a declarative service spec
+    Apply {
+        /// Path to YAML spec file
+        #[arg(short = 'f', long = "file")]
+        file: String,
+    },
     /// Manage aliases for cluster/service/container targets
     Alias {
         #[command(subcommand)]
@@ -94,6 +101,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
 
     match cli.command {
+        Command::Apply { file } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            apply::run(&aws_config, &file).await
+        }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
             AliasAction::Rm { name } => alias::remove(&name).await,

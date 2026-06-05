@@ -1,0 +1,29 @@
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: my-app
+  cluster: my-cluster
+spec:
+  image: nginx:latest
+  cpu: "256"
+  memory: "512"
+  arch: X86_64
+  capacity: FARGATE_SPOT
+  desiredCount: 1
+  execEnabled: true
+  port: 80
+  containerName: app
+  executionRoleArn: arn:aws:iam::123456789012:role/ecsTaskExecutionRole
+  taskRoleArn: arn:aws:iam::123456789012:role/my-app-task-role
+  subnets:
+    - subnet-aaa
+    - subnet-bbb
+  securityGroups:
+    - sg-xxx
+  assignPublicIp: false
+  logGroup: /ecs/my-app
+  env:
+    APP_ENV: production
+    LOG_LEVEL: info
+  secrets:
+    DB_PASSWORD: arn:aws:secretsmanager:us-east-1:123456789012:secret:my-db-pass
