@@ -3,18 +3,11 @@ use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str) -> Result<()> {
-    let cfg = Config::load()?;
-    let target = cfg
-        .aliases
-        .get(name)
-        .context(format!("alias '{name}' not found — provide a known alias or service name"))?
-        .clone();
-
-    let parts: Vec<&str> = target.splitn(4, '/').collect();
-    let (cluster, service) = match parts.len() {
-        2..=4 => (parts[0], parts[1]),
-        _ => anyhow::bail!("invalid alias target"),
+pub async fn run(config: &aws_config::SdkConfig, name: Option<&str>, file: Option<&str>) -> Result<()> {
+    let (cluster, service, alias_name) = match (name, file) {
+        (Some(n), _) => resolve_from_alias(n)?,
+        (None, Some(f)) => resolve_from_file(f)?,
+        _ => anyhow::bail!("provide a name or -f <file>"),
     };
 
     let ecs = EcsClient::new(config);
@@ -22,8 +15,8 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str) -> Result<()> {
     // Scale to 0 first (required before delete)
     eprintln!("⏬ Scaling {service} to 0...");
     ecs.update_service()
-        .cluster(cluster)
-        .service(service)
+        .cluster(&cluster)
+        .service(&service)
         .desired_count(0)
         .send()
         .await
@@ -32,17 +25,42 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str) -> Result<()> {
     // Delete service
     eprintln!("🗑️  Deleting service {service}...");
     ecs.delete_service()
-        .cluster(cluster)
-        .service(service)
+        .cluster(&cluster)
+        .service(&service)
         .send()
         .await
         .context("DeleteService failed")?;
 
     // Remove alias
     let mut cfg = Config::load()?;
-    cfg.aliases.remove(name);
+    cfg.aliases.remove(&alias_name);
     cfg.save()?;
 
-    eprintln!("✓ Deleted {cluster}/{service} and removed alias '{name}'");
+    eprintln!("✓ Deleted {cluster}/{service}");
     Ok(())
+}
+
+fn resolve_from_alias(name: &str) -> Result<(String, String, String)> {
+    let cfg = Config::load()?;
+    let target = cfg
+        .aliases
+        .get(name)
+        .context(format!("alias '{name}' not found"))?
+        .clone();
+
+    let parts: Vec<&str> = target.splitn(4, '/').collect();
+    match parts.len() {
+        2..=4 => Ok((parts[0].to_string(), parts[1].to_string(), name.to_string())),
+        _ => anyhow::bail!("invalid alias target"),
+    }
+}
+
+fn resolve_from_file(file: &str) -> Result<(String, String, String)> {
+    let content = std::fs::read_to_string(file).context("failed to read spec file")?;
+    let spec: crate::apply::ServiceSpec = serde_yaml::from_str(&content).context("failed to parse spec")?;
+    Ok((
+        spec.metadata.cluster.clone(),
+        spec.metadata.name.clone(),
+        spec.metadata.name,
+    ))
 }

@@ -58,7 +58,10 @@ enum Command {
     /// Delete a service
     Delete {
         /// Alias name or service name
-        name: String,
+        name: Option<String>,
+        /// Path to YAML spec file
+        #[arg(short = 'f', long = "file")]
+        file: Option<String>,
     },
     /// Manage aliases for cluster/service/container targets
     Alias {
@@ -111,9 +114,9 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             apply::run(&aws_config, &file).await
         }
-        Command::Delete { name } => {
+        Command::Delete { name, file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            delete::run(&aws_config, &name).await
+            delete::run(&aws_config, name.as_deref(), file.as_deref()).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
