@@ -111,9 +111,42 @@ fn default_capacity() -> String { "FARGATE".to_string() }
 fn default_count() -> i32 { 1 }
 fn default_port() -> u16 { 0 }
 
-pub async fn run(config: &aws_config::SdkConfig, file: &str) -> Result<()> {
+fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Result<()> {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = root;
+
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            // Set the value (try to preserve type: number, bool, or string)
+            let yaml_val = if let Ok(n) = value.parse::<i64>() {
+                serde_yaml::Value::Number(n.into())
+            } else if let Ok(b) = value.parse::<bool>() {
+                serde_yaml::Value::Bool(b)
+            } else {
+                serde_yaml::Value::String(value.to_string())
+            };
+            current[*part] = yaml_val;
+        } else {
+            current = &mut current[*part];
+            if current.is_null() {
+                *current = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String]) -> Result<()> {
     let content = std::fs::read_to_string(file).context("failed to read spec file")?;
-    let spec: ServiceSpec = serde_yaml::from_str(&content).context("failed to parse spec")?;
+    let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).context("failed to parse YAML")?;
+
+    // Apply --set overrides
+    for entry in overrides {
+        let (key, value) = entry.split_once('=').context(format!("invalid --set format '{}': expected KEY=VALUE", entry))?;
+        set_yaml_field(&mut yaml_value, key, value)?;
+    }
+
+    let spec: ServiceSpec = serde_yaml::from_value(yaml_value).context("failed to parse spec after overrides")?;
     spec.validate()?;
 
     let ecs = EcsClient::new(config);

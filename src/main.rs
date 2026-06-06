@@ -56,6 +56,9 @@ enum Command {
         /// Path to YAML spec file
         #[arg(short = 'f', long = "file")]
         file: String,
+        /// Override spec fields (e.g. --set spec.cpu=512 --set metadata.name=foo)
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        overrides: Vec<String>,
     },
     /// Delete a service
     Delete {
@@ -125,9 +128,9 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
 
     match cli.command {
-        Command::Apply { file } => {
+        Command::Apply { file, overrides } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            apply::run(&aws_config, &file).await
+            apply::run(&aws_config, &file, &overrides).await
         }
         Command::Delete { name, file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
