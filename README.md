@@ -2,6 +2,19 @@
 
 A wrapper around ECS Exec that gives you a kubectl-like experience on Amazon ECS.
 
+## Features
+
+- **Declarative deployments** — `apply` / `delete` / `restart` / `export` services with a simple YAML spec
+- **Interactive shell** — `exec` into running containers instantly
+- **File transfer** — `cp` files to/from containers via S3 presigned URLs (no AWS CLI needed in container)
+- **Directory sync** — `sync` local directories into containers (tar + upload + extract)
+- **Observability** — `get` task details and `log` with live tail
+- **Alias system** — short names for cluster/service/container targets
+- **Round-trip workflow** — `export` → edit → `apply`
+- **Sugar shell aliases** — `ecsh`, `ecscp`, `ecsync` for quick one-liners
+
+## Quick Start
+
 ```bash
 ecsctl apply -f service.yaml    # like: kubectl apply -f
 ecsctl exec chaodu bash          # like: kubectl exec -it pod -- bash
@@ -13,6 +26,19 @@ ecsctl delete chaodu             # like: kubectl delete
 ```
 
 ## Commands
+
+| Command | Description |
+|---------|-------------|
+| `ecsctl apply -f <file>` | Deploy a service declaratively |
+| `ecsctl delete <alias>` | Remove a service (scales to 0, deletes) |
+| `ecsctl restart <alias>` | Force a rolling restart |
+| `ecsctl export <alias>` | Export a running service to YAML |
+| `ecsctl exec <alias> [cmd]` | Execute a command in a container |
+| `ecsctl cp <src> <dst>` | Copy files to/from a container |
+| `ecsctl sync <dir> <alias>:<path>` | Sync a local directory to a container |
+| `ecsctl get <alias>` | Describe a task (status, health, resources) |
+| `ecsctl log <alias> [-f] [-n N]` | View or tail logs |
+| `ecsctl alias set\|ls\|rm` | Manage target aliases |
 
 ### `ecsctl apply` — deploy a service declaratively
 
@@ -97,6 +123,22 @@ ecsctl alias rm myapp
 
 Alias format: `cluster/service[/container[/task_id]]`. Omitted parts are auto-resolved at runtime.
 
+## Shell Aliases (Sugar)
+
+Add to `~/.bashrc` or `~/.zshrc`:
+
+```bash
+ecsh()   { ecsctl exec "$1" bash; }
+ecscp()  { ecsctl cp "$1" "$2"; }
+ecsync() { ecsctl sync "$1" "$2"; }
+```
+
+| Alias | Equivalent | Example |
+|-------|-----------|---------|
+| `ecsh <alias>` | `ecsctl exec <alias> bash` | `ecsh chaodu` |
+| `ecscp <src> <dst>` | `ecsctl cp <src> <dst>` | `ecscp myfile.txt chaodu:/tmp/` |
+| `ecsync <dir> <dst>` | `ecsctl sync <dir> <dst>` | `ecsync ./app chaodu:/opt/app` |
+
 ## Service Spec
 
 ```yaml
@@ -153,20 +195,6 @@ presign_expiry = 60
 
 [aliases]
 myapp = "my-cluster/my-service"
-```
-
-## Shell Aliases
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-ecsh() { ecsctl exec "$1" bash; }
-ecscp() { ecsctl cp "$1" "$2"; }
-ecsync() { ecsctl sync "$1" "$2"; }
-
-# Usage
-ecsh chaodu
-ecscp myfile.txt chaodu:/tmp/
-ecsync ./app chaodu:/opt/app
 ```
 
 ## Requirements
