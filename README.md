@@ -44,9 +44,14 @@ ecsctl delete chaodu             # like: kubectl delete
 
 ```bash
 ecsctl apply -f service.yaml
+ecsctl apply -f service.yaml --set spec.cpu=1024 --set metadata.name=my-app2
+ecsctl apply -f service.yaml --wait
 ```
 
 Registers a task definition and creates/updates the ECS service. Auto-registers an alias.
+
+- `--set KEY=VALUE` — override spec fields without editing the YAML (repeatable)
+- `--wait` — block until the deployment stabilizes (all tasks running)
 
 ### `ecsctl delete` — remove a service
 
@@ -170,6 +175,7 @@ spec:
     APP_ENV: production
   secrets:
     DB_PASSWORD: arn:aws:secretsmanager:...:secret:my-db
+  command: ["sh", "-c", "exec my-app serve"]   # optional: override container command
 ```
 
 ## How `cp` and `sync` work
