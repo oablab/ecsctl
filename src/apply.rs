@@ -117,12 +117,19 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
 
     for (i, part) in parts.iter().enumerate() {
         if i == parts.len() - 1 {
-            // Set the value (try to preserve type: number, bool, or string)
-            let yaml_val = if let Ok(n) = value.parse::<i64>() {
-                serde_yaml::Value::Number(n.into())
-            } else if let Ok(b) = value.parse::<bool>() {
-                serde_yaml::Value::Bool(b)
+            // Check original type to preserve it
+            let existing = &current[*part];
+            let yaml_val = if existing.is_bool() || (existing.is_null() && (value == "true" || value == "false")) {
+                serde_yaml::Value::Bool(value.parse::<bool>().unwrap_or(false))
+            } else if existing.is_number() {
+                // Original field is a number, keep as number
+                if let Ok(n) = value.parse::<i64>() {
+                    serde_yaml::Value::Number(n.into())
+                } else {
+                    serde_yaml::Value::String(value.to_string())
+                }
             } else {
+                // Default: keep as string (handles cpu/memory which are string-typed numbers)
                 serde_yaml::Value::String(value.to_string())
             };
             current[*part] = yaml_val;
