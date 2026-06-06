@@ -79,6 +79,10 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str
     let image = cd.image().unwrap_or("?").to_string();
     let container_name = cd.name().unwrap_or("app").to_string();
     let port = cd.port_mappings().first().map(|p| p.container_port().unwrap_or(0) as u16).unwrap_or(0);
+    let command: Option<Vec<String>> = {
+        let cmds = cd.command();
+        if cmds.is_empty() { None } else { Some(cmds.iter().map(|s| s.to_string()).collect()) }
+    };
 
     let mut env: HashMap<String, String> = HashMap::new();
     for kv in cd.environment() {
@@ -123,6 +127,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str
             assign_public_ip,
             container_name: Some(container_name),
             port,
+            command,
         },
     };
 

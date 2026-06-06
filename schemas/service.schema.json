@@ -83,6 +83,11 @@
           "default": "app",
           "description": "Container name in the task definition"
         },
+        "command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Override container command (e.g. [\"sh\", \"-c\", \"exec ...\"])"
+        },
         "executionRoleArn": {
           "type": "string",
           "pattern": "^arn:aws:iam::",

@@ -48,6 +48,8 @@ pub struct Spec {
     pub container_name: Option<String>,
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
 }
 
 const VALID_FARGATE_SIZING: &[(u32, &[u32])] = &[
@@ -127,6 +129,10 @@ pub async fn run(config: &aws_config::SdkConfig, file: &str) -> Result<()> {
         .name(container_name)
         .image(&spec.spec.image)
         .essential(true);
+
+    if let Some(ref cmd) = spec.spec.command {
+        container_def = container_def.set_command(Some(cmd.clone()));
+    }
 
     if spec.spec.port > 0 {
         container_def = container_def.port_mappings(
