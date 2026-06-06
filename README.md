@@ -160,9 +160,11 @@ myapp = "my-cluster/my-service"
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
 ecsh() { ecsctl exec "$1" bash; }
+ecscp() { ecsctl cp "$1" "$2"; }
 
 # Usage
 ecsh chaodu
+ecscp myfile.txt chaodu:/tmp/
 ```
 
 ## Requirements
