@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ecsctl Service Spec",
+  "description": "Declarative service definition for ecsctl apply",
+  "type": "object",
+  "required": ["metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "ecsctl/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "Service"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "cluster"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Service name (also used as task definition family and alias)"
+        },
+        "cluster": {
+          "type": "string",
+          "description": "ECS cluster name"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["image", "cpu", "memory"],
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Container image (e.g. nginx:latest, 123456.dkr.ecr.us-east-1.amazonaws.com/app:v1)"
+        },
+        "cpu": {
+          "type": "string",
+          "enum": ["256", "512", "1024", "2048", "4096"],
+          "description": "Task CPU units (256=0.25vCPU, 512=0.5, 1024=1, 2048=2, 4096=4)"
+        },
+        "memory": {
+          "type": "string",
+          "enum": ["512", "1024", "2048", "3072", "4096", "5120", "6144", "7168", "8192", "9216", "10240", "11264", "12288", "13312", "14336", "15360", "16384", "17408", "18432", "19456", "20480", "21504", "22528", "23552", "24576", "25600", "26624", "27648", "28672", "29696", "30720"],
+          "description": "Task memory in MB (must be valid for chosen cpu)"
+        },
+        "arch": {
+          "type": "string",
+          "enum": ["X86_64", "ARM64"],
+          "default": "X86_64",
+          "description": "CPU architecture"
+        },
+        "capacity": {
+          "type": "string",
+          "enum": ["FARGATE", "FARGATE_SPOT"],
+          "default": "FARGATE",
+          "description": "Capacity provider"
+        },
+        "desiredCount": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1,
+          "description": "Number of tasks to run"
+        },
+        "execEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable ECS Exec (requires task role with SSM permissions)"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 0,
+          "description": "Container port to expose (0 = none)"
+        },
+        "containerName": {
+          "type": "string",
+          "default": "app",
+          "description": "Container name in the task definition"
+        },
+        "executionRoleArn": {
+          "type": "string",
+          "pattern": "^arn:aws:iam::",
+          "description": "Task execution role ARN (for pulling images, logging)"
+        },
+        "taskRoleArn": {
+          "type": "string",
+          "pattern": "^arn:aws:iam::",
+          "description": "Task role ARN (permissions for the running container)"
+        },
+        "subnets": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^subnet-" },
+          "description": "VPC subnet IDs"
+        },
+        "securityGroups": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^sg-" },
+          "description": "Security group IDs"
+        },
+        "assignPublicIp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Assign a public IP to the task ENI"
+        },
+        "logGroup": {
+          "type": "string",
+          "description": "CloudWatch Logs group name (e.g. /ecs/my-app)"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables (key: value)"
+        },
+        "secrets": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Secrets from SSM/SecretsManager (key: ARN)"
+        }
+      }
+    }
+  }
+}
