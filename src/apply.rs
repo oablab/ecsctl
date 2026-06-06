@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServiceSpec {
     pub api_version: Option<String>,
     pub kind: Option<String>,
@@ -13,14 +13,14 @@ pub struct ServiceSpec {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Metadata {
     pub name: String,
     pub cluster: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Spec {
     pub image: String,
     pub cpu: String,
@@ -50,6 +50,60 @@ pub struct Spec {
     pub port: u16,
 }
 
+const VALID_FARGATE_SIZING: &[(u32, &[u32])] = &[
+    (256, &[512, 1024, 2048]),
+    (512, &[1024, 2048, 3072, 4096]),
+    (1024, &[2048, 3072, 4096, 5120, 6144, 7168, 8192]),
+    (2048, &[4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]),
+    (4096, &[8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]),
+];
+
+impl ServiceSpec {
+    pub fn validate(&self) -> Result<()> {
+        let spec = &self.spec;
+
+        // Validate arch
+        match spec.arch.as_str() {
+            "X86_64" | "ARM64" => {}
+            other => anyhow::bail!("invalid arch '{}': expected X86_64 or ARM64", other),
+        }
+
+        // Validate capacity
+        match spec.capacity.as_str() {
+            "FARGATE" | "FARGATE_SPOT" => {}
+            other => anyhow::bail!("invalid capacity '{}': expected FARGATE or FARGATE_SPOT", other),
+        }
+
+        // Validate cpu/memory combination
+        let cpu: u32 = spec.cpu.parse().context("cpu must be a number (e.g. \"256\")")?;
+        let mem: u32 = spec.memory.parse().context("memory must be a number (e.g. \"512\")")?;
+
+        let valid_mems = VALID_FARGATE_SIZING
+            .iter()
+            .find(|(c, _)| *c == cpu)
+            .map(|(_, m)| *m);
+
+        match valid_mems {
+            None => {
+                let valid_cpus: Vec<_> = VALID_FARGATE_SIZING.iter().map(|(c, _)| c.to_string()).collect();
+                anyhow::bail!("invalid cpu '{}': valid values are {}", cpu, valid_cpus.join(", "));
+            }
+            Some(mems) if !mems.contains(&mem) => {
+                let opts: Vec<_> = mems.iter().map(|m| m.to_string()).collect();
+                anyhow::bail!("invalid memory '{}' for cpu '{}': valid values are {}", mem, cpu, opts.join(", "));
+            }
+            _ => {}
+        }
+
+        // Validate desiredCount
+        if spec.desired_count < 0 {
+            anyhow::bail!("desiredCount must be >= 0");
+        }
+
+        Ok(())
+    }
+}
+
 fn default_arch() -> String { "X86_64".to_string() }
 fn default_capacity() -> String { "FARGATE".to_string() }
 fn default_count() -> i32 { 1 }
@@ -58,6 +112,7 @@ fn default_port() -> u16 { 0 }
 pub async fn run(config: &aws_config::SdkConfig, file: &str) -> Result<()> {
     let content = std::fs::read_to_string(file).context("failed to read spec file")?;
     let spec: ServiceSpec = serde_yaml::from_str(&content).context("failed to parse spec")?;
+    spec.validate()?;
 
     let ecs = EcsClient::new(config);
     let cluster = &spec.metadata.cluster;
