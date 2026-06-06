@@ -141,7 +141,10 @@ ecsync() { ecsctl sync "$1" "$2"; }
 
 ## Service Spec
 
+Add this comment for editor autocomplete (VS Code + YAML extension):
+
 ```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oablab/ecsctl/master/schemas/service.schema.json
 apiVersion: ecsctl/v1
 kind: Service
 metadata:
