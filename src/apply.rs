@@ -363,20 +363,24 @@ async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> Resul
         let svc = resp.services().first().context("service not found")?;
         let deployments = svc.deployments();
 
-        // Stable = exactly 1 deployment with running == desired
         if deployments.len() == 1 {
             let d = &deployments[0];
             let running = d.running_count();
             let desired = d.desired_count();
-            eprint!("\r  🚀 {running}/{desired} tasks running");
             if running == desired {
+                eprint!("\r  ✅ {running}/{desired} tasks running                    ");
                 eprintln!();
                 return Ok(());
             }
+            eprint!("\r  🚀 {running}/{desired} tasks running");
         } else {
             let primary = deployments.iter().find(|d| d.status().unwrap_or_default() == "PRIMARY");
+            let old_count: i32 = deployments.iter()
+                .filter(|d| d.status().unwrap_or_default() != "PRIMARY")
+                .map(|d| d.running_count())
+                .sum();
             if let Some(d) = primary {
-                eprint!("\r  🔄 rolling: {}/{} new tasks running", d.running_count(), d.desired_count());
+                eprint!("\r  🔄 new: {}/{} running, draining {} old task(s)...", d.running_count(), d.desired_count(), old_count);
             }
         }
     }
