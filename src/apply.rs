@@ -143,7 +143,7 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
     Ok(())
 }
 
-pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String]) -> Result<()> {
+pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String], wait: bool) -> Result<()> {
     let content = std::fs::read_to_string(file).context("failed to read spec file")?;
     let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).context("failed to parse YAML")?;
 
@@ -338,5 +338,46 @@ pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String
     }
 
     eprintln!("✓ Applied {file}");
+
+    if wait {
+        eprintln!("⏳ Waiting for deployment to stabilize...");
+        wait_for_stable(&ecs, cluster, service_name).await?;
+        eprintln!("✓ Deployment stable");
+    }
+
     Ok(())
+}
+
+async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> Result<()> {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let resp = ecs
+            .describe_services()
+            .cluster(cluster)
+            .services(service)
+            .send()
+            .await
+            .context("DescribeServices failed")?;
+
+        let svc = resp.services().first().context("service not found")?;
+        let deployments = svc.deployments();
+
+        // Stable = exactly 1 deployment with running == desired
+        if deployments.len() == 1 {
+            let d = &deployments[0];
+            let running = d.running_count();
+            let desired = d.desired_count();
+            eprint!("\r  🚀 {running}/{desired} tasks running");
+            if running == desired {
+                eprintln!();
+                return Ok(());
+            }
+        } else {
+            let primary = deployments.iter().find(|d| d.status().unwrap_or_default() == "PRIMARY");
+            if let Some(d) = primary {
+                eprint!("\r  🔄 rolling: {}/{} new tasks running", d.running_count(), d.desired_count());
+            }
+        }
+    }
 }

@@ -59,6 +59,9 @@ enum Command {
         /// Override spec fields (e.g. --set spec.cpu=512 --set metadata.name=foo)
         #[arg(long = "set", value_name = "KEY=VALUE")]
         overrides: Vec<String>,
+        /// Wait for deployment to stabilize
+        #[arg(long)]
+        wait: bool,
     },
     /// Delete a service
     Delete {
@@ -128,9 +131,9 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
 
     match cli.command {
-        Command::Apply { file, overrides } => {
+        Command::Apply { file, overrides, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            apply::run(&aws_config, &file, &overrides).await
+            apply::run(&aws_config, &file, &overrides, wait).await
         }
         Command::Delete { name, file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
