@@ -109,6 +109,7 @@ ecsctl exec chaodu -- cat /etc/hosts     # command with args
 ```bash
 ecsctl cp myfile.txt chaodu:/tmp/myfile.txt      # upload
 ecsctl cp chaodu:/tmp/output.log ./output.log    # download
+ecsctl cp botA:/data/model.bin botB:/data/       # container-to-container
 ```
 
 ### `ecsctl sync` — sync a local directory to a container
