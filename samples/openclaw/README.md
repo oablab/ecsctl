@@ -114,47 +114,9 @@ You can also access the web UI at `http://<task-public-ip>:18789` and configure 
 ecsctl get openclaw        # check task status
 ecsctl log openclaw -f     # tail logs — look for "[gateway] ready"
 ecsctl exec openclaw bash  # shell into the container
-```
 
-## Data Persistence
-
-Fargate tasks are **ephemeral** — the `/home/node/.openclaw/` directory (config, auth profiles, agent memory) is lost when the task is replaced. Use `ecsync` and `ecscp` to back up and restore state.
-
-### Backup to local
-
-```bash
-# Copy the entire config directory to local
-ecsctl cp openclaw:/home/node/.openclaw/ ./openclaw-backup/
-
-# Or sync it
-ecsctl sync openclaw:/home/node/.openclaw/ ./openclaw-backup/
-```
-
-### Restore after redeploy
-
-```bash
-# Sync saved config back into a fresh container
-ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
-```
-
-### Tip: S3 as durable storage
-
-For automated backup, sync the config to S3 from your local machine:
-
-```bash
-# Backup: container → local → S3
-ecsctl cp openclaw:/home/node/.openclaw/ ./openclaw-backup/
-aws s3 sync ./openclaw-backup/ s3://my-bucket/openclaw-config/
-
-# Restore: S3 → local → container
-aws s3 sync s3://my-bucket/openclaw-config/ ./openclaw-backup/
-ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
-```
-
-After restoring, restart the gateway to pick up the config:
-
-```bash
-ecsctl restart openclaw
+# Get the gateway URL
+ecsctl get openclaw -o jsonpath='http://{.tasks[0].public_ip}:18789'
 ```
 
 ## Notes
@@ -163,3 +125,55 @@ ecsctl restart openclaw
 - **Port 18789** is OpenClaw's default. The gateway exposes `/healthz` and `/readyz` for health checks.
 - **FARGATE_SPOT** saves ~70% cost. Switch to `FARGATE` if you need guaranteed availability.
 - **No LLM credentials at startup** — the gateway runs without any AI provider. Add them later.
+- **Origin check** — OpenClaw validates browser origins. The minimal config uses `dangerouslyAllowHostHeaderOriginFallback: true` to accept any origin matching the Host header. For production, set explicit `allowedOrigins` with your domain.
+
+---
+
+## Follow-up: Production Readiness
+
+### 1. HTTPS behind ALB
+
+The minimal setup exposes HTTP on a Fargate public IP — no TLS, IP changes on every deploy. For production, put it behind an ALB:
+
+```
+Browser → HTTPS :443 → ALB (ACM cert) → HTTP :18789 → Fargate task (private)
+```
+
+Benefits:
+- **HTTPS termination** with an ACM certificate (free, auto-renewed)
+- **Stable domain** — ALB DNS name or custom domain via Route 53
+- **Fixed `allowedOrigins`** — no more IP guessing (`["https://openclaw.example.com"]`)
+- **No public IP on task** — `assignPublicIp: false`, ALB routes to private subnet
+- **Health checks** — ALB checks `/healthz` and replaces unhealthy tasks
+
+> `ecsctl apply` will support ALB target group configuration soon. The service spec will accept a `targetGroup` field to wire up automatically.
+
+### 2. Data Persistence
+
+Fargate tasks are **ephemeral** — `/home/node/.openclaw/` (config, auth profiles, agent memory) is lost when the task is replaced. Use `ecscp` and `ecsync` to back up and restore state.
+
+**Backup to local:**
+
+```bash
+ecscp openclaw:/home/node/.openclaw/ ./openclaw-backup/
+```
+
+**Restore after redeploy:**
+
+```bash
+ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
+ecsctl restart openclaw
+```
+
+**S3 as durable storage:**
+
+```bash
+# Backup: container → local → S3
+ecscp openclaw:/home/node/.openclaw/ ./openclaw-backup/
+aws s3 sync ./openclaw-backup/ s3://my-bucket/openclaw-config/
+
+# Restore: S3 → local → container
+aws s3 sync s3://my-bucket/openclaw-config/ ./openclaw-backup/
+ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
+ecsctl restart openclaw
+```
