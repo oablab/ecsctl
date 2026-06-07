@@ -19,6 +19,22 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str
     };
 
     let ecs = EcsClient::new(config);
+    let spec = build_spec(&ecs, cluster, service).await?;
+    let yaml = serde_yaml::to_string(&spec).context("failed to serialize YAML")?;
+
+    match output {
+        Some(out_file) => {
+            std::fs::write(out_file, &yaml)?;
+            eprintln!("✓ Exported {cluster}/{service} → {out_file}");
+        }
+        None => {
+            print!("{yaml}");
+        }
+    }
+    Ok(())
+}
+
+async fn build_spec(ecs: &EcsClient, cluster: &str, service: &str) -> Result<crate::apply::ServiceSpec> {
 
     // Get service details
     let svc_resp = ecs
@@ -131,16 +147,25 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str
         },
     };
 
-    let yaml = serde_yaml::to_string(&spec).context("failed to serialize YAML")?;
+    Ok(spec)
+}
 
-    match output {
-        Some(out_file) => {
-            std::fs::write(out_file, &yaml)?;
-            eprintln!("✓ Exported {cluster}/{service} → {out_file}");
-        }
-        None => {
-            print!("{yaml}");
-        }
-    }
-    Ok(())
+/// Export a service to YAML string (used by clone).
+pub async fn export_to_yaml(config: &aws_config::SdkConfig, name: &str) -> Result<String> {
+    let cfg = Config::load()?;
+    let target = cfg
+        .aliases
+        .get(name)
+        .context(format!("alias '{name}' not found"))?
+        .clone();
+
+    let parts: Vec<&str> = target.splitn(4, '/').collect();
+    let (cluster, service) = match parts.len() {
+        2..=4 => (parts[0], parts[1]),
+        _ => anyhow::bail!("invalid alias target"),
+    };
+
+    let ecs = EcsClient::new(config);
+    let spec = build_spec(&ecs, cluster, service).await?;
+    serde_yaml::to_string(&spec).context("failed to serialize YAML")
 }

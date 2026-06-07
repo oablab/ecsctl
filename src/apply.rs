@@ -145,7 +145,12 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
 
 pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String], wait: bool) -> Result<()> {
     let content = crate::loader::load(file).await?;
-    let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).context("failed to parse YAML")?;
+    run_from_string(config, &content, overrides, wait).await
+}
+
+/// Apply from a YAML string (used by clone).
+pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, overrides: &[String], wait: bool) -> Result<()> {
+    let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(content).context("failed to parse YAML")?;
 
     // Apply --set overrides
     for entry in overrides {
@@ -337,7 +342,7 @@ pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String
         eprintln!("  ✓ Alias '{service_name}' → {alias_target}");
     }
 
-    eprintln!("✓ Applied {file}");
+    eprintln!("✓ Applied {service_name}");
 
     if wait {
         eprintln!("⏳ Waiting for deployment to stabilize...");
