@@ -217,5 +217,18 @@ myapp = "my-cluster/my-service"
 ## Install
 
 ```bash
+# macOS (Apple Silicon)
+curl -sL https://github.com/oablab/ecsctl/releases/latest/download/ecsctl-darwin-arm64.tar.gz | tar xz -O > ~/.local/bin/ecsctl && chmod +x ~/.local/bin/ecsctl
+
+# Linux (x86_64)
+curl -sL https://github.com/oablab/ecsctl/releases/latest/download/ecsctl-linux-amd64.tar.gz | tar xz -O > ~/.local/bin/ecsctl && chmod +x ~/.local/bin/ecsctl
+
+# Linux (ARM64)
+curl -sL https://github.com/oablab/ecsctl/releases/latest/download/ecsctl-linux-arm64.tar.gz | tar xz -O > ~/.local/bin/ecsctl && chmod +x ~/.local/bin/ecsctl
+```
+
+Or build from source:
+
+```bash
 cargo install --path .
 ```
