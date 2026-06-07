@@ -24,6 +24,7 @@ ecsctl cp file.txt chaodu:/tmp/  # like: kubectl cp
 ecsctl sync ./app chaodu:/opt/   # tar + upload + extract
 ecsctl get chaodu                # like: kubectl describe pod
 ecsctl log chaodu -f             # like: kubectl logs -f
+ecsctl clone chaodu chaodu2      # clone with a new name
 ecsctl delete chaodu             # like: kubectl delete
 ```
 
