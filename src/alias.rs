@@ -67,7 +67,7 @@ async fn lookup_public_ip(ec2: &Ec2Client, eni_id: &str) -> Option<String> {
 }
 
 /// Describe the resolved task for an alias
-pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, json_output: bool) -> Result<()> {
+pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: Option<&str>) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -110,8 +110,15 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, json_out
         .await
         .context("DescribeTasks failed")?;
 
-    if json_output {
-        return print_json(config, &ecs, alias_name, &target, cluster, service, &desc).await;
+    if let Some(fmt) = output {
+        if fmt == "json" || fmt == "--json" {
+            return print_json(config, &ecs, alias_name, &target, cluster, service, &desc).await;
+        } else if let Some(template) = fmt.strip_prefix("jsonpath=") {
+            let template = template.trim_matches('\'');
+            return print_jsonpath(config, &ecs, alias_name, &target, cluster, service, &desc, template).await;
+        } else {
+            anyhow::bail!("unknown output format '{}': use 'json' or \"jsonpath='<template>'\"", fmt);
+        }
     }
 
     println!("Alias:   {alias_name}");
@@ -284,6 +291,20 @@ async fn print_json(
     service: &str,
     desc: &aws_sdk_ecs::operation::describe_tasks::DescribeTasksOutput,
 ) -> Result<()> {
+    let output = build_json(config, ecs, alias_name, target, cluster, service, desc).await?;
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+async fn build_json(
+    config: &aws_config::SdkConfig,
+    ecs: &EcsClient,
+    alias_name: &str,
+    target: &str,
+    cluster: &str,
+    service: &str,
+    desc: &aws_sdk_ecs::operation::describe_tasks::DescribeTasksOutput,
+) -> Result<serde_json::Value> {
     let mut tasks_json = Vec::new();
 
     for task in desc.tasks() {
@@ -364,17 +385,108 @@ async fn print_json(
         }));
     }
 
-    let output = serde_json::json!({
+    Ok(serde_json::json!({
         "alias": alias_name,
         "target": target,
         "cluster": cluster,
         "service": service,
         "tasks": tasks_json,
-    });
+    }))
+}
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+async fn print_jsonpath(
+    config: &aws_config::SdkConfig,
+    ecs: &EcsClient,
+    alias_name: &str,
+    target: &str,
+    cluster: &str,
+    service: &str,
+    desc: &aws_sdk_ecs::operation::describe_tasks::DescribeTasksOutput,
+    template: &str,
+) -> Result<()> {
+    // Build the same JSON as print_json, then evaluate the template
+    let json_value = build_json(config, ecs, alias_name, target, cluster, service, desc).await?;
+
+    // Replace {.path.to.field} or {.path[index].field} with resolved values
+    let result = resolve_jsonpath_template(template, &json_value);
+    println!("{result}");
     Ok(())
 }
+
+/// Resolve a jsonpath template: replaces `{.path}` expressions with values from JSON.
+fn resolve_jsonpath_template(template: &str, value: &serde_json::Value) -> String {
+    let mut result = String::new();
+    let mut rest = template;
+
+    while let Some(start) = rest.find('{') {
+        result.push_str(&rest[..start]);
+        let after_brace = &rest[start + 1..];
+        if let Some(end) = after_brace.find('}') {
+            let path = &after_brace[..end];
+            let resolved = resolve_path(path.trim(), value);
+            result.push_str(&resolved);
+            rest = &after_brace[end + 1..];
+        } else {
+            result.push('{');
+            rest = after_brace;
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Resolve a dot-path like `.tasks[0].public_ip` against a JSON value.
+fn resolve_path(path: &str, value: &serde_json::Value) -> String {
+    let path = path.strip_prefix('.').unwrap_or(path);
+    let mut current = value;
+
+    for segment in split_path_segments(path) {
+        match segment {
+            PathSegment::Key(key) => {
+                current = &current[key];
+            }
+            PathSegment::Index(key, idx) => {
+                current = &current[key][idx];
+            }
+        }
+        if current.is_null() {
+            return String::new();
+        }
+    }
+
+    match current {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+enum PathSegment<'a> {
+    Key(&'a str),
+    Index(&'a str, usize),
+}
+
+fn split_path_segments(path: &str) -> Vec<PathSegment<'_>> {
+    let mut segments = Vec::new();
+    for part in path.split('.') {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(bracket) = part.find('[') {
+            let key = &part[..bracket];
+            let idx_str = &part[bracket + 1..part.len() - 1];
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                segments.push(PathSegment::Index(key, idx));
+            } else {
+                segments.push(PathSegment::Key(part));
+            }
+        } else {
+            segments.push(PathSegment::Key(part));
+        }
+    }
+    segments
+}
+
 /// Resolve an alias to "cluster/task_id/container" (ready for exec/cp/sync).
 /// Alias format: cluster/service[/container[/task_id]]
 /// - 2 parts (cluster/service): auto-resolve container + newest task
