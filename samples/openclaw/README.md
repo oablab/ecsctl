@@ -177,3 +177,12 @@ aws s3 sync s3://my-bucket/openclaw-config/ ./openclaw-backup/
 ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
 ecsctl restart openclaw
 ```
+
+### 3. Clone for Multiple Instances
+
+Spin up additional instances with a single command:
+
+```bash
+ecsctl clone openclaw openclaw2                              # exact copy
+ecsctl clone openclaw openclaw-dev --set spec.capacity=FARGATE  # dev on on-demand
+```

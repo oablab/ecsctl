@@ -100,3 +100,12 @@ env:
 - **s6-overlay**: PID 1 supervisor — auto-restarts gateway on crash
 - **Data**: All state lives in `/opt/data`. Ephemeral on Fargate — use `ecscp`/`ecsync` for backup.
 - **`HERMES_DASHBOARD_INSECURE=1`**: Skips auth gate — for demo only. Use OAuth or basic auth in production.
+
+## Clone
+
+Spin up additional instances with a single command:
+
+```bash
+ecsctl clone hermes hermes2                              # exact copy
+ecsctl clone hermes hermes-prod --set spec.capacity=FARGATE  # on-demand for prod
+```
