@@ -44,12 +44,14 @@ ecsctl delete chaodu             # like: kubectl delete
 
 ```bash
 ecsctl apply -f service.yaml
+ecsctl apply -f https://example.com/service.yaml   # remote URL
 ecsctl apply -f service.yaml --set spec.cpu=1024 --set metadata.name=my-app2
 ecsctl apply -f service.yaml --wait
 ```
 
 Registers a task definition and creates/updates the ECS service. Auto-registers an alias.
 
+- `-f` accepts a local file path or a remote HTTPS URL
 - `--set KEY=VALUE` — override spec fields without editing the YAML (repeatable)
 - `--wait` — block until the deployment stabilizes (all tasks running)
 
@@ -58,6 +60,7 @@ Registers a task definition and creates/updates the ECS service. Auto-registers 
 ```bash
 ecsctl delete chaodu              # by alias
 ecsctl delete -f service.yaml     # by spec file
+ecsctl delete -f https://example.com/service.yaml  # remote URL
 ```
 
 Scales to 0, deletes the service, removes the alias.
