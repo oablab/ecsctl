@@ -74,8 +74,10 @@ pub async fn run(
         upload(&s3, src, dst, &staging_bucket, &key, expiry).await
     } else if is_remote(src) && !is_remote(dst) {
         download(&s3, src, dst, &staging_bucket, &key, expiry).await
+    } else if is_remote(src) && is_remote(dst) {
+        remote_to_remote(&s3, src, dst, &staging_bucket, &key, expiry).await
     } else {
-        bail!("exactly one of src/dst must be a remote path (cluster/task/container:/path)")
+        bail!("at least one of src/dst must be a remote path (alias:/path)")
     }
 }
 
@@ -184,6 +186,60 @@ async fn download(
     // 4. Cleanup
     s3.delete_object().bucket(bucket).key(key).send().await?;
     eprintln!("✓ Copied {cluster}/{task}/{container}:{remote_path} → {local_dest}");
+    Ok(())
+}
+
+async fn remote_to_remote(
+    s3: &S3Client,
+    src: &str,
+    dst: &str,
+    bucket: &str,
+    key: &str,
+    expiry: Duration,
+) -> Result<()> {
+    let (src_cluster, src_task, src_container, src_path) =
+        parse_remote(src).context("invalid source remote path")?;
+    let (dst_cluster, dst_task, dst_container, dst_path) =
+        parse_remote(dst).context("invalid destination remote path")?;
+
+    // 1. Generate presigned PUT URL
+    let put_presigned = s3
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .presigned(PresigningConfig::expires_in(expiry)?)
+        .await
+        .context("failed to generate presigned PUT URL")?;
+    let put_url = put_presigned.uri();
+
+    // 2. ECS Exec into source: tar + upload to S3
+    let src_cmd = format!(
+        "sh -c 'tar czf - -C \"$(dirname \"{src_path}\")\" \"$(basename \"{src_path}\")\" | curl -sf -T - \"{put_url}\" || tar czf - -C \"$(dirname \"{src_path}\")\" \"$(basename \"{src_path}\")\" | wget -q --method=PUT --body-file=- -O /dev/null \"{put_url}\"'"
+    );
+    eprintln!("⬆ [{src_container}] Uploading {src_path} to S3...");
+    ecs_exec(src_cluster, src_task, src_container, &src_cmd)?;
+
+    // 3. Generate presigned GET URL
+    let get_presigned = s3
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .presigned(PresigningConfig::expires_in(expiry)?)
+        .await
+        .context("failed to generate presigned GET URL")?;
+    let get_url = get_presigned.uri();
+
+    // 4. ECS Exec into destination: download + untar
+    let dst_dir = if dst_path.ends_with('/') { dst_path.to_string() } else { dst_path.to_string() };
+    let dst_cmd = format!(
+        "sh -c 'mkdir -p \"{dst_dir}\" && (curl -sf \"{get_url}\" | tar xzf - -C \"{dst_dir}\") || (wget -q -O - \"{get_url}\" | tar xzf - -C \"{dst_dir}\")'"
+    );
+    eprintln!("⬇ [{dst_container}] Downloading to {dst_path}...");
+    ecs_exec(dst_cluster, dst_task, dst_container, &dst_cmd)?;
+
+    // 5. Cleanup S3
+    s3.delete_object().bucket(bucket).key(key).send().await?;
+    eprintln!("✓ Copied {src_container}:{src_path} → {dst_container}:{dst_path}");
     Ok(())
 }
 
