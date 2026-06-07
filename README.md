@@ -107,11 +107,12 @@ ecsctl sync ./my-app chaodu:/opt/app
 
 ```bash
 ecsctl get chaodu              # human-readable
-ecsctl get chaodu --json       # JSON (pipe to jq)
-ecsctl get chaodu --json | jq '.tasks[0].capacity'
+ecsctl get chaodu -o json      # JSON (pipe to jq)
+ecsctl get chaodu -o json | jq '.tasks[0].capacity'
+ecsctl get chaodu -o "jsonpath='http://{.tasks[0].public_ip}:8080'"  # template
 ```
 
-Output includes: status, health, CPU/memory, arch, capacity provider, AZ, connectivity, exec status, env vars (secrets masked), and recent logs.
+Output includes: status, public/private IP, health, CPU/memory, arch, capacity provider, AZ, connectivity, exec status, env vars (secrets masked), and recent logs.
 
 ### `ecsctl log` — view logs
 
