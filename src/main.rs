@@ -1,5 +1,6 @@
 mod alias;
 mod apply;
+mod clone;
 mod config;
 mod cp;
 mod delete;
@@ -77,6 +78,16 @@ enum Command {
         /// Alias name
         name: String,
     },
+    /// Clone a service: export source → apply as new name
+    Clone {
+        /// Source alias
+        source: String,
+        /// New service name
+        target: String,
+        /// Override spec fields (e.g. --set spec.cpu=512)
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        overrides: Vec<String>,
+    },
     /// Export a running service to a YAML spec file
     Export {
         /// Alias name
@@ -143,6 +154,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Restart { name } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             restart::run(&aws_config, &name).await
+        }
+        Command::Clone { source, target, overrides } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            clone::run(&aws_config, &source, &target, &overrides).await
         }
         Command::Export { name, output } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;

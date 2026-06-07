@@ -33,6 +33,7 @@ ecsctl delete chaodu             # like: kubectl delete
 | `ecsctl apply -f <file>` | Deploy a service declaratively |
 | `ecsctl delete <alias>` | Remove a service (scales to 0, deletes) |
 | `ecsctl restart <alias>` | Force a rolling restart |
+| `ecsctl clone <src> <dst>` | Clone a service under a new name |
 | `ecsctl export <alias>` | Export a running service to YAML |
 | `ecsctl exec <alias> [cmd]` | Execute a command in a container |
 | `ecsctl cp <src> <dst>` | Copy files to/from a container |
@@ -73,6 +74,16 @@ ecsctl restart chaodu
 ```
 
 Triggers a new deployment (rolling replacement of all tasks).
+
+### `ecsctl clone` — clone a service
+
+```bash
+ecsctl clone botA botB                              # exact copy, new name
+ecsctl clone botA botB --set spec.cpu=2048          # clone with overrides
+ecsctl clone botA botB --set spec.capacity=FARGATE  # switch to on-demand
+```
+
+Exports the source service and deploys it under a new name. Supports `--set` for overrides.
 
 ### `ecsctl export` — export a running service to YAML
 
