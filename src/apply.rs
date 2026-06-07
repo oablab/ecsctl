@@ -144,7 +144,7 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
 }
 
 pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String], wait: bool) -> Result<()> {
-    let content = std::fs::read_to_string(file).context("failed to read spec file")?;
+    let content = crate::loader::load(file).await?;
     let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(&content).context("failed to parse YAML")?;
 
     // Apply --set overrides

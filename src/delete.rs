@@ -6,7 +6,7 @@ use crate::config::Config;
 pub async fn run(config: &aws_config::SdkConfig, name: Option<&str>, file: Option<&str>) -> Result<()> {
     let (cluster, service, alias_name) = match (name, file) {
         (Some(n), _) => resolve_from_alias(n)?,
-        (None, Some(f)) => resolve_from_file(f)?,
+        (None, Some(f)) => resolve_from_file(f).await?,
         _ => anyhow::bail!("provide a name or -f <file>"),
     };
 
@@ -55,8 +55,8 @@ fn resolve_from_alias(name: &str) -> Result<(String, String, String)> {
     }
 }
 
-fn resolve_from_file(file: &str) -> Result<(String, String, String)> {
-    let content = std::fs::read_to_string(file).context("failed to read spec file")?;
+async fn resolve_from_file(file: &str) -> Result<(String, String, String)> {
+    let content = crate::loader::load(file).await?;
     let spec: crate::apply::ServiceSpec = serde_yaml::from_str(&content).context("failed to parse spec")?;
     Ok((
         spec.metadata.cluster.clone(),

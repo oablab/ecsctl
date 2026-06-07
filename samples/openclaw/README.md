@@ -2,6 +2,40 @@
 
 Run a minimal OpenClaw gateway on ECS Fargate — no LLM credentials required at startup.
 
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ECS Fargate (FARGATE_SPOT)                                     │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │  Container: openclaw                                      │  │
+│  │  Image: ghcr.io/openclaw/openclaw:latest                  │  │
+│  │                                                           │  │
+│  │  ┌─────────────────────┐    ┌──────────────────────────┐  │  │
+│  │  │  OpenClaw Gateway   │    │  /home/node/.openclaw/   │  │  │
+│  │  │  :18789             │    │  ├── openclaw.json       │  │  │
+│  │  │                     │    │  ├── agents/             │  │  │
+│  │  │  • Web UI           │    │  └── workspace/          │  │  │
+│  │  │  • REST API         │    │       (ephemeral)        │  │  │
+│  │  │  • WebSocket        │    │                          │  │  │
+│  │  └─────────────────────┘    └──────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                          │                     ▲                 │
+└──────────────────────────┼─────────────────────┼─────────────────┘
+                           │                     │
+              ┌────────────▼──────┐    ┌─────────┴─────────┐
+              │  CloudWatch Logs  │    │  Secrets Manager   │
+              │  /ecs/openclaw    │    │  OPENCLAW_GATEWAY_ │
+              └───────────────────┘    │  TOKEN             │
+                                       └───────────────────┘
+
+  ┌──────────┐         ecsync / ecscp          ┌──────────┐
+  │  Local   │◀──────────────────────────────▶  │    S3    │
+  │  Machine │   backup/restore .openclaw/      │  Bucket  │
+  └──────────┘                                  └──────────┘
+```
+
 ## How it works
 
 The official OpenClaw Docker image (`ghcr.io/openclaw/openclaw:latest`) requires a config file to skip the interactive setup wizard. We pre-seed a minimal `openclaw.json` at container startup with two key settings:
@@ -80,6 +114,47 @@ You can also access the web UI at `http://<task-public-ip>:18789` and configure 
 ecsctl get openclaw        # check task status
 ecsctl log openclaw -f     # tail logs — look for "[gateway] ready"
 ecsctl exec openclaw bash  # shell into the container
+```
+
+## Data Persistence
+
+Fargate tasks are **ephemeral** — the `/home/node/.openclaw/` directory (config, auth profiles, agent memory) is lost when the task is replaced. Use `ecsync` and `ecscp` to back up and restore state.
+
+### Backup to local
+
+```bash
+# Copy the entire config directory to local
+ecsctl cp openclaw:/home/node/.openclaw/ ./openclaw-backup/
+
+# Or sync it
+ecsctl sync openclaw:/home/node/.openclaw/ ./openclaw-backup/
+```
+
+### Restore after redeploy
+
+```bash
+# Sync saved config back into a fresh container
+ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
+```
+
+### Tip: S3 as durable storage
+
+For automated backup, sync the config to S3 from your local machine:
+
+```bash
+# Backup: container → local → S3
+ecsctl cp openclaw:/home/node/.openclaw/ ./openclaw-backup/
+aws s3 sync ./openclaw-backup/ s3://my-bucket/openclaw-config/
+
+# Restore: S3 → local → container
+aws s3 sync s3://my-bucket/openclaw-config/ ./openclaw-backup/
+ecsync ./openclaw-backup/ openclaw:/home/node/.openclaw/
+```
+
+After restoring, restart the gateway to pick up the config:
+
+```bash
+ecsctl restart openclaw
 ```
 
 ## Notes
