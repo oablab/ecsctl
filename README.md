@@ -1,9 +1,10 @@
 # ecsctl
 
-A wrapper around ECS Exec that gives you a kubectl-like experience on Amazon ECS.
+An agent-first CLI that gives you a kubectl-like experience on Amazon ECS. Built for deploying and managing AI agent workloads — OpenClaw, Hermes, OpenAB, and any containerized agent — as easily as generic ECS services.
 
 ## Features
 
+- **Agent-ready** — deploy AI agent workflows (OpenClaw, Hermes, OpenAB, etc.) with a single YAML spec
 - **Declarative deployments** — `apply` / `delete` / `restart` / `export` services with a simple YAML spec
 - **Interactive shell** — `exec` into running containers instantly
 - **File transfer** — `cp` files to/from containers via S3 presigned URLs (no AWS CLI needed in container)
