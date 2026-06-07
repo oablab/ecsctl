@@ -385,3 +385,84 @@ async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> Resul
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_yaml() -> &'static str {
+        r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: test-app
+  cluster: test-cluster
+spec:
+  image: nginx:latest
+  cpu: "256"
+  memory: "512"
+"#
+    }
+
+    #[test]
+    fn test_parse_minimal_spec() {
+        let spec: ServiceSpec = serde_yaml::from_str(minimal_yaml()).unwrap();
+        assert_eq!(spec.metadata.name, "test-app");
+        assert_eq!(spec.metadata.cluster, "test-cluster");
+        assert_eq!(spec.spec.arch, "X86_64");
+        assert_eq!(spec.spec.capacity, "FARGATE");
+        assert_eq!(spec.spec.desired_count, 1);
+    }
+
+    #[test]
+    fn test_validate_valid_spec() {
+        let spec: ServiceSpec = serde_yaml::from_str(minimal_yaml()).unwrap();
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_cpu() {
+        let yaml = minimal_yaml().replace("\"256\"", "\"123\"");
+        let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_invalid_memory_for_cpu() {
+        let yaml = minimal_yaml().replace("\"512\"", "\"8192\"");
+        let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_invalid_arch() {
+        let yaml = minimal_yaml().replace("cpu: \"256\"", "cpu: \"256\"\n  arch: MIPS");
+        let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn test_set_yaml_field_string() {
+        let mut val: serde_yaml::Value = serde_yaml::from_str(minimal_yaml()).unwrap();
+        set_yaml_field(&mut val, "metadata.name", "new-name").unwrap();
+        let spec: ServiceSpec = serde_yaml::from_value(val).unwrap();
+        assert_eq!(spec.metadata.name, "new-name");
+    }
+
+    #[test]
+    fn test_set_yaml_field_number_stays_string() {
+        // cpu is a string field that holds a number
+        let mut val: serde_yaml::Value = serde_yaml::from_str(minimal_yaml()).unwrap();
+        set_yaml_field(&mut val, "spec.cpu", "512").unwrap();
+        let spec: ServiceSpec = serde_yaml::from_value(val).unwrap();
+        assert_eq!(spec.spec.cpu, "512");
+    }
+
+    #[test]
+    fn test_set_yaml_field_bool() {
+        let mut val: serde_yaml::Value = serde_yaml::from_str(minimal_yaml()).unwrap();
+        set_yaml_field(&mut val, "spec.execEnabled", "true").unwrap();
+        let spec: ServiceSpec = serde_yaml::from_value(val).unwrap();
+        assert!(spec.spec.exec_enabled);
+    }
+}
