@@ -11,6 +11,7 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-ecs = "1"
+aws-sdk-ec2 = "1"
 aws-sdk-cloudwatchlogs = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sts = "1"
