@@ -4,7 +4,7 @@ An agent-first CLI that gives you a kubectl-like experience on Amazon ECS. Built
 
 ## Features
 
-- **Agent-ready** — deploy AI agent workflows (OpenClaw, Hermes, OpenAB, etc.) with a single YAML spec
+- **Agent-ready** — deploy AI agent frameworks (OpenClaw, Hermes, OpenAB, etc.) with a single YAML spec
 - **Declarative deployments** — `apply` / `delete` / `restart` / `export` services with a simple YAML spec
 - **Interactive shell** — `exec` into running containers instantly
 - **File transfer** — `cp` files to/from containers via S3 presigned URLs (no AWS CLI needed in container)
@@ -12,6 +12,7 @@ An agent-first CLI that gives you a kubectl-like experience on Amazon ECS. Built
 - **Observability** — `get` task details and `log` with live tail
 - **Alias system** — short names for cluster/service/container targets
 - **Round-trip workflow** — `export` → edit → `apply`
+- **Clone** — `clone` a running service under a new name with optional overrides
 - **Sugar shell aliases** — `ecsh`, `ecscp`, `ecsync` for quick one-liners
 
 ## Quick Start
