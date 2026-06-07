@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use aws_sdk_ecs::Client as EcsClient;
+use aws_sdk_ec2::Client as Ec2Client;
 use aws_sdk_cloudwatchlogs::Client as LogsClient;
 
 use crate::config::Config;
@@ -33,6 +34,36 @@ pub async fn list() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Extract private IP and ENI ID from task attachment details.
+fn extract_eni_details(task: &aws_sdk_ecs::types::Task) -> (Option<String>, Option<String>) {
+    let mut private_ip = None;
+    let mut eni_id = None;
+    for attachment in task.attachments() {
+        for detail in attachment.details() {
+            match detail.name().unwrap_or_default() {
+                "privateIPv4Address" => private_ip = detail.value().map(|v| v.to_string()),
+                "networkInterfaceId" => eni_id = detail.value().map(|v| v.to_string()),
+                _ => {}
+            }
+        }
+    }
+    (private_ip, eni_id)
+}
+
+/// Look up public IP for an ENI.
+async fn lookup_public_ip(ec2: &Ec2Client, eni_id: &str) -> Option<String> {
+    ec2.describe_network_interfaces()
+        .network_interface_ids(eni_id)
+        .send()
+        .await
+        .ok()?
+        .network_interfaces()
+        .first()?
+        .association()
+        .and_then(|a| a.public_ip())
+        .map(|s| s.to_string())
 }
 
 /// Describe the resolved task for an alias
@@ -133,6 +164,19 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, json_out
 
         println!("  Task:       {task_id}");
         println!("  Status:     {status}");
+
+        // Show IPs
+        let (private_ip, eni_id) = extract_eni_details(task);
+        if let Some(ref ip) = private_ip {
+            println!("  PrivateIP:  {ip}");
+        }
+        if let Some(ref eni) = eni_id {
+            let ec2 = Ec2Client::new(config);
+            if let Some(pub_ip) = lookup_public_ip(&ec2, eni).await {
+                println!("  PublicIP:   {pub_ip}");
+            }
+        }
+
         println!("  Health:     {health}");
         println!("  Started:    {started}");
         println!("  CPU/Memory: {cpu} / {memory}");
@@ -292,6 +336,14 @@ async fn print_json(
             containers_json.push(cj);
         }
 
+        let (private_ip, eni_id) = extract_eni_details(task);
+        let public_ip = if let Some(ref eni) = eni_id {
+            let ec2 = Ec2Client::new(config);
+            lookup_public_ip(&ec2, eni).await
+        } else {
+            None
+        };
+
         tasks_json.push(serde_json::json!({
             "task_id": task_id,
             "status": task.last_status().unwrap_or("?"),
@@ -306,6 +358,8 @@ async fn print_json(
             "connectivity": task.connectivity().map(|c| c.as_str()).unwrap_or("?"),
             "exec_enabled": task.enable_execute_command(),
             "task_definition": task_def_arn,
+            "private_ip": private_ip,
+            "public_ip": public_ip,
             "containers": containers_json,
         }));
     }
