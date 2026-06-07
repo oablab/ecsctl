@@ -5,6 +5,7 @@ mod cp;
 mod delete;
 mod exec;
 mod export;
+mod loader;
 mod logs;
 mod restart;
 mod sync;

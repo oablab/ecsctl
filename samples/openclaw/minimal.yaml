@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oablab/ecsctl/master/schemas/service.schema.json
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: openclaw
+  cluster: my-cluster
+spec:
+  image: ghcr.io/openclaw/openclaw:latest
+  cpu: '1024'
+  memory: '4096'
+  arch: X86_64
+  capacity: FARGATE_SPOT
+  desiredCount: 1
+  execEnabled: true
+  port: 18789
+  containerName: openclaw
+  executionRoleArn: arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole
+  taskRoleArn: arn:aws:iam::ACCOUNT_ID:role/my-task-role
+  subnets:
+  - subnet-xxx
+  securityGroups:
+  - sg-xxx
+  assignPublicIp: true
+  logGroup: /ecs/openclaw
+  env:
+    NODE_ENV: production
+  secrets:
+    OPENCLAW_GATEWAY_TOKEN: 'arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:my-secret:OPENCLAW_GATEWAY_TOKEN::'
+  command:
+  - sh
+  - -c
+  - |
+    mkdir -p /home/node/.openclaw &&
+    cat > /home/node/.openclaw/openclaw.json << 'EOF'
+    {"gateway":{"mode":"local","port":18789,"bind":"lan"},"wizard":{"lastRunAt":"2026-01-01T00:00:00.000Z"}}
+    EOF
+    exec node dist/index.js gateway --port 18789
