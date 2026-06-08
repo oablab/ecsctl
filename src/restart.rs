@@ -3,7 +3,7 @@ use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str) -> Result<()> {
+pub async fn run(config: &aws_config::SdkConfig, name: &str, wait: bool) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -29,5 +29,12 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str) -> Result<()> {
         .context("UpdateService (force new deployment) failed")?;
 
     eprintln!("✓ New deployment triggered for {cluster}/{service}");
+
+    if wait {
+        eprintln!("⏳ Waiting for deployment to stabilize...");
+        crate::apply::wait_for_stable(&ecs, cluster, service).await?;
+        eprintln!("✓ Deployment stable");
+    }
+
     Ok(())
 }

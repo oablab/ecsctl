@@ -353,7 +353,7 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
     Ok(())
 }
 
-async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> Result<()> {
+pub async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> Result<()> {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
@@ -385,6 +385,11 @@ async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> Resul
                 .map(|d| d.running_count())
                 .sum();
             if let Some(d) = primary {
+                if d.running_count() == d.desired_count() && old_count == 0 {
+                    eprint!("\r  ✅ {}/{} tasks running                    ", d.running_count(), d.desired_count());
+                    eprintln!();
+                    return Ok(());
+                }
                 eprint!("\r  🔄 new: {}/{} running, draining {} old task(s)...", d.running_count(), d.desired_count(), old_count);
             }
         }

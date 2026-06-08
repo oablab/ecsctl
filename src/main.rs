@@ -77,6 +77,9 @@ enum Command {
     Restart {
         /// Alias name
         name: String,
+        /// Wait for deployment to stabilize
+        #[arg(long)]
+        wait: bool,
     },
     /// Clone a service: export source → apply as new name
     Clone {
@@ -151,9 +154,9 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             delete::run(&aws_config, name.as_deref(), file.as_deref()).await
         }
-        Command::Restart { name } => {
+        Command::Restart { name, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run(&aws_config, &name).await
+            restart::run(&aws_config, &name, wait).await
         }
         Command::Clone { source, target, overrides } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
