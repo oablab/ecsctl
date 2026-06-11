@@ -372,8 +372,15 @@ pub async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> R
             let d = &deployments[0];
             let running = d.running_count();
             let desired = d.desired_count();
-            if running == desired {
+            // Only consider stable when running == desired AND desired > 0
+            // (desired == 0 means scale-down — wait for rolloutState instead)
+            if running == desired && desired > 0 {
                 eprint!("\r  ✅ {running}/{desired} tasks running                    ");
+                eprintln!();
+                return Ok(());
+            }
+            if desired == 0 && d.rollout_state() == Some(&aws_sdk_ecs::types::DeploymentRolloutState::Completed) {
+                eprint!("\r  ✅ scaled to 0 (deployment complete)                    ");
                 eprintln!();
                 return Ok(());
             }
