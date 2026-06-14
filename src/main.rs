@@ -11,6 +11,7 @@ mod logs;
 mod restart;
 mod scale;
 mod sync;
+mod update;
 
 use clap::{Parser, Subcommand};
 use config::Config;
@@ -88,6 +89,17 @@ enum Command {
         name: String,
         /// Desired task count (0 to N)
         count: i32,
+        /// Wait for deployment to stabilize
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Update a service in-place (export + apply --set without intermediate file)
+    Update {
+        /// Alias name
+        name: String,
+        /// Override spec fields (e.g. --set spec.cpu=512 --set spec.image=nginx:latest)
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        overrides: Vec<String>,
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
@@ -172,6 +184,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             scale::run(&aws_config, &name, count, wait).await
+        }
+        Command::Update { name, overrides, wait } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            update::run(&aws_config, &name, &overrides, wait).await
         }
         Command::Clone { source, target, overrides } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
