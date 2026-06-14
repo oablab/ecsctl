@@ -3,19 +3,21 @@ use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, overrides: &[String], wait: bool) -> Result<()> {
-    // Require at least one --set override
+fn validate_overrides(overrides: &[String]) -> Result<()> {
     if overrides.is_empty() {
         anyhow::bail!("at least one --set override is required");
     }
-
-    // Block metadata.name and metadata.cluster overrides
     for entry in overrides {
         let key = entry.split('=').next().unwrap_or("");
         if key == "metadata.name" || key == "metadata.cluster" {
             anyhow::bail!("cannot override '{key}' via update — use 'clone' to deploy to a different service/cluster");
         }
     }
+    Ok(())
+}
+
+pub async fn run(config: &aws_config::SdkConfig, name: &str, overrides: &[String], wait: bool) -> Result<()> {
+    validate_overrides(overrides)?;
 
     // Guard: abort if service has sidecar containers that would be silently dropped
     check_no_sidecars(config, name).await?;
@@ -77,4 +79,44 @@ async fn check_no_sidecars(config: &aws_config::SdkConfig, name: &str) -> Result
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_overrides_rejected() {
+        let overrides: Vec<String> = vec![];
+        assert!(validate_overrides(&overrides).is_err());
+    }
+
+    #[test]
+    fn test_metadata_name_blocked() {
+        let overrides = vec!["metadata.name=other".to_string()];
+        let err = validate_overrides(&overrides).unwrap_err();
+        assert!(err.to_string().contains("metadata.name"));
+    }
+
+    #[test]
+    fn test_metadata_cluster_blocked() {
+        let overrides = vec!["metadata.cluster=other".to_string()];
+        let err = validate_overrides(&overrides).unwrap_err();
+        assert!(err.to_string().contains("metadata.cluster"));
+    }
+
+    #[test]
+    fn test_valid_overrides_accepted() {
+        let overrides = vec!["spec.cpu=512".to_string()];
+        assert!(validate_overrides(&overrides).is_ok());
+    }
+
+    #[test]
+    fn test_multiple_valid_overrides() {
+        let overrides = vec![
+            "spec.cpu=512".to_string(),
+            "spec.image=nginx:latest".to_string(),
+        ];
+        assert!(validate_overrides(&overrides).is_ok());
+    }
 }
