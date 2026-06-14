@@ -14,6 +14,7 @@ An agent-first CLI that gives you a kubectl-like experience on Amazon ECS. Built
 - **Round-trip workflow** — `export` → edit → `apply`
 - **Clone** — `clone` a running service under a new name with optional overrides
 - **Scale** — `scale` a service to any desired task count (0 to N)
+- **In-place update** — `update` a service with `--set` overrides without export/apply
 - **Sugar shell aliases** — `ecsh`, `ecscp`, `ecsync` for quick one-liners
 
 ## Quick Start
@@ -37,6 +38,7 @@ ecsctl delete chaodu             # like: kubectl delete
 | `ecsctl delete <alias>` | Remove a service (scales to 0, deletes) |
 | `ecsctl restart <alias>` | Force a rolling restart |
 | `ecsctl scale <alias> <count>` | Scale a service to N desired tasks |
+| `ecsctl update <alias> --set key=val` | Update a service in-place |
 | `ecsctl clone <src> <dst>` | Clone a service under a new name |
 | `ecsctl export <alias>` | Export a running service to YAML |
 | `ecsctl exec <alias> [cmd]` | Execute a command in a container |
@@ -88,6 +90,16 @@ ecsctl scale chaodu 3 --wait   # scale to 3 and wait for stabilization
 ```
 
 Sets the desired task count for a service. Use `--wait` to block until all tasks are running.
+
+### `ecsctl update` — update a service in-place
+
+```bash
+ecsctl update chaodu --set spec.cpu=512
+ecsctl update chaodu --set spec.image=nginx:latest --set spec.memory=1024
+ecsctl update chaodu --set spec.desiredCount=2 --wait
+```
+
+Equivalent to `export` → `apply --set`, but without an intermediate file. Requires at least one `--set` override. Blocked from changing `metadata.name` or `metadata.cluster` (use `clone` instead). Aborts if the service has sidecar containers.
 
 ### `ecsctl clone` — clone a service
 
