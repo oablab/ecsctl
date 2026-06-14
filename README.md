@@ -13,6 +13,7 @@ An agent-first CLI that gives you a kubectl-like experience on Amazon ECS. Built
 - **Alias system** — short names for cluster/service/container targets
 - **Round-trip workflow** — `export` → edit → `apply`
 - **Clone** — `clone` a running service under a new name with optional overrides
+- **Scale** — `scale` a service to any desired task count (0 to N)
 - **Sugar shell aliases** — `ecsh`, `ecscp`, `ecsync` for quick one-liners
 
 ## Quick Start
@@ -35,6 +36,7 @@ ecsctl delete chaodu             # like: kubectl delete
 | `ecsctl apply -f <file>` | Deploy a service declaratively |
 | `ecsctl delete <alias>` | Remove a service (scales to 0, deletes) |
 | `ecsctl restart <alias>` | Force a rolling restart |
+| `ecsctl scale <alias> <count>` | Scale a service to N desired tasks |
 | `ecsctl clone <src> <dst>` | Clone a service under a new name |
 | `ecsctl export <alias>` | Export a running service to YAML |
 | `ecsctl exec <alias> [cmd]` | Execute a command in a container |
@@ -76,6 +78,16 @@ ecsctl restart chaodu
 ```
 
 Triggers a new deployment (rolling replacement of all tasks).
+
+### `ecsctl scale` — scale a service
+
+```bash
+ecsctl scale chaodu 0          # scale to 0 (no running tasks)
+ecsctl scale chaodu 1          # scale to 1 task
+ecsctl scale chaodu 3 --wait   # scale to 3 and wait for stabilization
+```
+
+Sets the desired task count for a service. Use `--wait` to block until all tasks are running.
 
 ### `ecsctl clone` — clone a service
 

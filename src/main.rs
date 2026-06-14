@@ -9,6 +9,7 @@ mod export;
 mod loader;
 mod logs;
 mod restart;
+mod scale;
 mod sync;
 
 use clap::{Parser, Subcommand};
@@ -77,6 +78,16 @@ enum Command {
     Restart {
         /// Alias name
         name: String,
+        /// Wait for deployment to stabilize
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Scale a service to a desired task count
+    Scale {
+        /// Alias name
+        name: String,
+        /// Desired task count (0 to N)
+        count: i32,
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
@@ -157,6 +168,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Restart { name, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             restart::run(&aws_config, &name, wait).await
+        }
+        Command::Scale { name, count, wait } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            scale::run(&aws_config, &name, count, wait).await
         }
         Command::Clone { source, target, overrides } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
