@@ -3,10 +3,15 @@ use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: bool) -> Result<()> {
+fn validate_count(count: i32) -> Result<()> {
     if count < 0 {
         anyhow::bail!("count must be >= 0, got {count}");
     }
+    Ok(())
+}
+
+pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: bool) -> Result<()> {
+    validate_count(count)?;
 
     let cfg = Config::load()?;
     let target = cfg
@@ -41,4 +46,26 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: b
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_count_negative() {
+        assert!(validate_count(-1).is_err());
+        assert!(validate_count(-100).is_err());
+    }
+
+    #[test]
+    fn test_validate_count_zero() {
+        assert!(validate_count(0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_count_positive() {
+        assert!(validate_count(1).is_ok());
+        assert!(validate_count(10).is_ok());
+    }
 }
