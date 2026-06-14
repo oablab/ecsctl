@@ -3,7 +3,11 @@ use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32) -> Result<()> {
+pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: bool) -> Result<()> {
+    if count < 0 {
+        anyhow::bail!("count must be >= 0, got {count}");
+    }
+
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -29,5 +33,12 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32) -> Resu
         .context("UpdateService (scale) failed")?;
 
     eprintln!("✓ Desired count set to {count} for {cluster}/{service}");
+
+    if wait {
+        eprintln!("⏳ Waiting for deployment to stabilize...");
+        crate::apply::wait_for_stable(&ecs, cluster, service).await?;
+        eprintln!("✓ Deployment stable");
+    }
+
     Ok(())
 }
