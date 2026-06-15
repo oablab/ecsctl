@@ -7,6 +7,7 @@ use std::time::Duration;
 
 /// Default presigned URL expiry. Must cover: ECS Exec API call (~2s) + SSM session
 /// setup (~3-5s) + command start (~1-2s) + actual file transfer time.
+#[allow(dead_code)]
 pub const DEFAULT_PRESIGN_EXPIRY: Duration = Duration::from_secs(60);
 
 /// Parse "cluster/task/container:/remote/path" into parts

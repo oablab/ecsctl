@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use aws_sdk_ecs::Client as EcsClient;
+
 use std::process::Command as ProcessCommand;
 
 /// Parse "cluster/task/container" into parts
@@ -13,7 +13,7 @@ fn parse_target(s: &str) -> Result<(&str, &str, &str)> {
 }
 
 pub async fn run(
-    config: &aws_config::SdkConfig,
+    _config: &aws_config::SdkConfig,
     target: &str,
     command: Option<&str>,
 ) -> Result<()> {

@@ -605,7 +605,7 @@ async fn find_newest_task_with_container(
     let newest = desc
         .tasks()
         .iter()
-        .filter(|t| t.last_status().map(|s| s.as_ref()) == Some("RUNNING"))
+        .filter(|t| t.last_status() == Some("RUNNING"))
         .max_by_key(|t| t.started_at())
         .context("no RUNNING tasks found")?;
 
@@ -620,11 +620,11 @@ async fn find_newest_task_with_container(
     let container_name = newest
         .containers()
         .iter()
-        .filter(|c| {
-            let name = c.name().unwrap_or_default();
-            !name.starts_with("ecs-service-connect-")
+        .find(|c| {
+            !c.name()
+                .unwrap_or_default()
+                .starts_with("ecs-service-connect-")
         })
-        .next()
         .and_then(|c| c.name())
         .context("task has no app containers")?
         .to_string();

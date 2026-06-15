@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use aws_sdk_cloudwatchlogs::Client as LogsClient;
 use aws_sdk_ecs::Client as EcsClient;
 
-use crate::alias;
+
 use crate::config::Config;
 
 pub async fn run(
@@ -51,7 +51,7 @@ pub async fn run(
     let task = desc
         .tasks()
         .iter()
-        .filter(|t| t.last_status().map(|s| s.as_ref()) == Some("RUNNING"))
+        .filter(|t| t.last_status() == Some("RUNNING"))
         .max_by_key(|t| t.started_at())
         .context("no RUNNING tasks")?;
 

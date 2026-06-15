@@ -303,7 +303,7 @@ pub async fn run_from_string(
     let cluster = &spec.metadata.cluster;
     let service_name = &spec.metadata.name;
     let container_name = spec.spec.container_name.as_deref().unwrap_or("app");
-    let family = format!("{service_name}");
+    let family = service_name.to_string();
 
     // 1. Register task definition
     eprintln!("📋 Registering task definition...");
