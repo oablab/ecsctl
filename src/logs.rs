@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use aws_sdk_cloudwatchlogs::Client as LogsClient;
 use aws_sdk_ecs::Client as EcsClient;
 
-
 use crate::config::Config;
 
 pub async fn run(
