@@ -19,9 +19,31 @@ pub struct Metadata {
     pub cluster: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(default = "default_essential")]
+    pub essential: bool,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub secrets: HashMap<String, String>,
+    #[serde(default)]
+    pub log_group: Option<String>,
+}
+
+fn default_essential() -> bool { true }
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Spec {
+    #[serde(default)]
     pub image: String,
     pub cpu: String,
     pub memory: String,
@@ -50,6 +72,8 @@ pub struct Spec {
     pub port: u16,
     #[serde(default)]
     pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub containers: Option<Vec<ContainerSpec>>,
 }
 
 const VALID_FARGATE_SIZING: &[(u32, &[u32])] = &[
@@ -143,6 +167,57 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
     Ok(())
 }
 
+fn build_container_def(cs: &ContainerSpec, service_name: &str, region: &str) -> Result<aws_sdk_ecs::types::ContainerDefinition> {
+    let mut builder = aws_sdk_ecs::types::ContainerDefinition::builder()
+        .name(&cs.name)
+        .image(&cs.image)
+        .essential(cs.essential);
+
+    if let Some(ref cmd) = cs.command {
+        builder = builder.set_command(Some(cmd.clone()));
+    }
+
+    if cs.port > 0 {
+        builder = builder.port_mappings(
+            aws_sdk_ecs::types::PortMapping::builder()
+                .container_port(cs.port as i32)
+                .protocol(aws_sdk_ecs::types::TransportProtocol::Tcp)
+                .build(),
+        );
+    }
+
+    for (k, v) in &cs.env {
+        builder = builder.environment(
+            aws_sdk_ecs::types::KeyValuePair::builder()
+                .name(k)
+                .value(v)
+                .build(),
+        );
+    }
+
+    for (k, v) in &cs.secrets {
+        builder = builder.secrets(
+            aws_sdk_ecs::types::Secret::builder()
+                .name(k)
+                .value_from(v)
+                .build()?,
+        );
+    }
+
+    if let Some(ref log_group) = cs.log_group {
+        builder = builder.log_configuration(
+            aws_sdk_ecs::types::LogConfiguration::builder()
+                .log_driver(aws_sdk_ecs::types::LogDriver::Awslogs)
+                .options("awslogs-group", log_group.as_str())
+                .options("awslogs-region", region)
+                .options("awslogs-stream-prefix", service_name)
+                .build()?,
+        );
+    }
+
+    Ok(builder.build())
+}
+
 pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String], wait: bool) -> Result<()> {
     let content = crate::loader::load(file).await?;
     run_from_string(config, &content, overrides, wait).await
@@ -170,53 +245,7 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
     // 1. Register task definition
     eprintln!("📋 Registering task definition...");
 
-    let mut container_def = aws_sdk_ecs::types::ContainerDefinition::builder()
-        .name(container_name)
-        .image(&spec.spec.image)
-        .essential(true);
-
-    if let Some(ref cmd) = spec.spec.command {
-        container_def = container_def.set_command(Some(cmd.clone()));
-    }
-
-    if spec.spec.port > 0 {
-        container_def = container_def.port_mappings(
-            aws_sdk_ecs::types::PortMapping::builder()
-                .container_port(spec.spec.port as i32)
-                .protocol(aws_sdk_ecs::types::TransportProtocol::Tcp)
-                .build(),
-        );
-    }
-
-    for (k, v) in &spec.spec.env {
-        container_def = container_def.environment(
-            aws_sdk_ecs::types::KeyValuePair::builder()
-                .name(k)
-                .value(v)
-                .build(),
-        );
-    }
-
-    for (k, v) in &spec.spec.secrets {
-        container_def = container_def.secrets(
-            aws_sdk_ecs::types::Secret::builder()
-                .name(k)
-                .value_from(v)
-                .build()?,
-        );
-    }
-
-    if let Some(ref log_group) = spec.spec.log_group {
-        let region = config.region().map(|r| r.as_ref()).unwrap_or("us-east-1");
-        container_def = container_def.log_configuration(
-            aws_sdk_ecs::types::LogConfiguration::builder()
-                .log_driver(aws_sdk_ecs::types::LogDriver::Awslogs)
-                .options("awslogs-group", log_group.as_str())
-                .options("awslogs-region", region)
-                .options("awslogs-stream-prefix", service_name.as_str())
-                .build()?,
-        );
-    }
+    let region = config.region().map(|r| r.as_ref()).unwrap_or("us-east-1");
 
     let mut task_def_req = ecs
         .register_task_definition()
@@ -230,8 +259,29 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
                 .cpu_architecture(spec.spec.arch.as_str().into())
                 .operating_system_family(aws_sdk_ecs::types::OsFamily::Linux)
                 .build(),
-        )
-        .container_definitions(container_def.build());
+        );
+
+    if let Some(ref containers) = spec.spec.containers {
+        // Multi-container mode
+        for cs in containers {
+            let cd = build_container_def(cs, service_name, region)?;
+            task_def_req = task_def_req.container_definitions(cd);
+        }
+    } else {
+        // Single-container mode (backward-compatible)
+        let cs = ContainerSpec {
+            name: container_name.to_string(),
+            image: spec.spec.image.clone(),
+            essential: true,
+            port: spec.spec.port,
+            command: spec.spec.command.clone(),
+            env: spec.spec.env.clone(),
+            secrets: spec.spec.secrets.clone(),
+            log_group: spec.spec.log_group.clone(),
+        };
+        let cd = build_container_def(&cs, service_name, region)?;
+        task_def_req = task_def_req.container_definitions(cd);
+    }
 
     if let Some(ref role) = spec.spec.execution_role_arn {
         task_def_req = task_def_req.execution_role_arn(role);
@@ -483,3 +533,33 @@ spec:
         assert!(spec.spec.exec_enabled);
     }
 }
+
+    #[test]
+    fn test_parse_multi_container_spec() {
+        let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: multi-app
+  cluster: test-cluster
+spec:
+  cpu: "512"
+  memory: "1024"
+  capacity: FARGATE_SPOT
+  containers:
+    - name: app
+      image: nginx:latest
+      essential: true
+      port: 80
+    - name: sidecar
+      image: envoy:latest
+      essential: false
+      port: 9901
+"#;
+        let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.spec.containers.as_ref().unwrap().len(), 2);
+        assert_eq!(spec.spec.containers.as_ref().unwrap()[0].name, "app");
+        assert!(spec.spec.containers.as_ref().unwrap()[0].essential);
+        assert!(!spec.spec.containers.as_ref().unwrap()[1].essential);
+        assert!(spec.validate().is_ok());
+    }

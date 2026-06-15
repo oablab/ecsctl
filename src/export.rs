@@ -86,36 +86,73 @@ async fn build_spec(ecs: &EcsClient, cluster: &str, service: &str) -> Result<cra
         .map(|a| a.as_str().to_string())
         .unwrap_or_else(|| "X86_64".to_string());
 
-    // Get container definition (skip sidecars)
-    let cd = td.container_definitions()
+    // Get container definitions (skip service-connect sidecars)
+    let app_containers: Vec<_> = td.container_definitions()
         .iter()
-        .find(|c| !c.name().unwrap_or_default().starts_with("ecs-service-connect-"))
-        .context("no app container")?;
+        .filter(|c| !c.name().unwrap_or_default().starts_with("ecs-service-connect-"))
+        .collect();
 
-    let image = cd.image().unwrap_or("?").to_string();
-    let container_name = cd.name().unwrap_or("app").to_string();
-    let port = cd.port_mappings().first().map(|p| p.container_port().unwrap_or(0) as u16).unwrap_or(0);
-    let command: Option<Vec<String>> = {
-        let cmds = cd.command();
-        if cmds.is_empty() { None } else { Some(cmds.iter().map(|s| s.to_string()).collect()) }
-    };
-
-    let mut env: HashMap<String, String> = HashMap::new();
-    for kv in cd.environment() {
-        if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
-            env.insert(k.to_string(), v.to_string());
+    let (image, container_name, port, command, env, secrets, log_group, containers) = if app_containers.len() > 1 {
+        // Multi-container: export as containers array
+        let mut cs_vec = Vec::new();
+        for cd in &app_containers {
+            let mut env_map: HashMap<String, String> = HashMap::new();
+            for kv in cd.environment() {
+                if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
+                    env_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            let mut sec_map: HashMap<String, String> = HashMap::new();
+            for s in cd.secrets() {
+                sec_map.insert(s.name().to_string(), s.value_from().to_string());
+            }
+            let lg = cd.log_configuration()
+                .and_then(|lc| lc.options())
+                .and_then(|opts| opts.get("awslogs-group"))
+                .map(|s| s.to_string());
+            let p = cd.port_mappings().first().map(|p| p.container_port().unwrap_or(0) as u16).unwrap_or(0);
+            let cmd: Option<Vec<String>> = {
+                let cmds = cd.command();
+                if cmds.is_empty() { None } else { Some(cmds.iter().map(|s| s.to_string()).collect()) }
+            };
+            cs_vec.push(crate::apply::ContainerSpec {
+                name: cd.name().unwrap_or("app").to_string(),
+                image: cd.image().unwrap_or("?").to_string(),
+                essential: cd.essential().unwrap_or(true),
+                port: p,
+                command: cmd,
+                env: env_map,
+                secrets: sec_map,
+                log_group: lg,
+            });
         }
-    }
-
-    let mut secrets: HashMap<String, String> = HashMap::new();
-    for s in cd.secrets() {
-        secrets.insert(s.name().to_string(), s.value_from().to_string());
-    }
-
-    let log_group = cd.log_configuration()
-        .and_then(|lc| lc.options())
-        .and_then(|opts| opts.get("awslogs-group"))
-        .map(|s| s.to_string());
+        (String::new(), "app".to_string(), 0u16, None, HashMap::new(), HashMap::new(), None, Some(cs_vec))
+    } else {
+        // Single-container (original behavior)
+        let cd = app_containers.first().context("no app container")?;
+        let image = cd.image().unwrap_or("?").to_string();
+        let cn = cd.name().unwrap_or("app").to_string();
+        let port = cd.port_mappings().first().map(|p| p.container_port().unwrap_or(0) as u16).unwrap_or(0);
+        let command: Option<Vec<String>> = {
+            let cmds = cd.command();
+            if cmds.is_empty() { None } else { Some(cmds.iter().map(|s| s.to_string()).collect()) }
+        };
+        let mut env: HashMap<String, String> = HashMap::new();
+        for kv in cd.environment() {
+            if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
+                env.insert(k.to_string(), v.to_string());
+            }
+        }
+        let mut secrets: HashMap<String, String> = HashMap::new();
+        for s in cd.secrets() {
+            secrets.insert(s.name().to_string(), s.value_from().to_string());
+        }
+        let log_group = cd.log_configuration()
+            .and_then(|lc| lc.options())
+            .and_then(|opts| opts.get("awslogs-group"))
+            .map(|s| s.to_string());
+        (image, cn, port, command, env, secrets, log_group, None)
+    };
 
     // Build YAML
     let spec = crate::apply::ServiceSpec {
@@ -144,6 +181,7 @@ async fn build_spec(ecs: &EcsClient, cluster: &str, service: &str) -> Result<cra
             container_name: Some(container_name),
             port,
             command,
+            containers,
         },
     };
 
