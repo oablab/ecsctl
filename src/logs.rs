@@ -5,7 +5,12 @@ use aws_sdk_ecs::Client as EcsClient;
 use crate::alias;
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32, follow: bool) -> Result<()> {
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    name: &str,
+    lines: i32,
+    follow: bool,
+) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -50,7 +55,12 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32, follow:
         .max_by_key(|t| t.started_at())
         .context("no RUNNING tasks")?;
 
-    let task_id = task.task_arn().unwrap_or("?").rsplit('/').next().unwrap_or("?");
+    let task_id = task
+        .task_arn()
+        .unwrap_or("?")
+        .rsplit('/')
+        .next()
+        .unwrap_or("?");
     let task_def_arn = task.task_definition_arn().context("no task def ARN")?;
 
     // Get log config from task definition
@@ -65,13 +75,19 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32, follow:
     let cd = td
         .container_definitions()
         .iter()
-        .find(|cd| !cd.name().unwrap_or_default().starts_with("ecs-service-connect-"))
+        .find(|cd| {
+            !cd.name()
+                .unwrap_or_default()
+                .starts_with("ecs-service-connect-")
+        })
         .context("no app container found")?;
 
     let log_config = cd.log_configuration().context("no log configuration")?;
     let opts = log_config.options().context("no log options")?;
     let group = opts.get("awslogs-group").context("no awslogs-group")?;
-    let prefix = opts.get("awslogs-stream-prefix").context("no awslogs-stream-prefix")?;
+    let prefix = opts
+        .get("awslogs-stream-prefix")
+        .context("no awslogs-stream-prefix")?;
     let container_name = cd.name().unwrap_or("app");
     let stream_name = format!("{prefix}/{container_name}/{task_id}");
 
@@ -98,7 +114,12 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, lines: i32, follow:
     }
 }
 
-async fn tail_follow(logs: &LogsClient, group: &str, stream: &str, initial_lines: i32) -> Result<()> {
+async fn tail_follow(
+    logs: &LogsClient,
+    group: &str,
+    stream: &str,
+    initial_lines: i32,
+) -> Result<()> {
     // Get initial batch
     let resp = logs
         .get_log_events()

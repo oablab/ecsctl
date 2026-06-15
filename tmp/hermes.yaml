@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oablab/ecsctl/master/schemas/service.schema.json
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: hermes
+  cluster: openab
+spec:
+  image: nousresearch/hermes-agent:latest
+  cpu: '1024'
+  memory: '2048'
+  arch: X86_64
+  capacity: FARGATE_SPOT
+  desiredCount: 1
+  execEnabled: true
+  port: 9119
+  containerName: hermes
+  executionRoleArn: arn:aws:iam::903779448426:role/openab-ecs-execution-role
+  taskRoleArn: arn:aws:iam::903779448426:role/openab-ecs-task-chaodu
+  subnets:
+  - subnet-0564da5939b9f37e8
+  securityGroups:
+  - sg-0bc22bce7e98d79b0
+  assignPublicIp: true
+  logGroup: /ecs/hermes
+  env:
+    API_SERVER_ENABLED: 'true'
+    API_SERVER_HOST: 0.0.0.0
+    API_SERVER_KEY: hermes-demo-key-change-me
+    HERMES_DASHBOARD: '1'
+    HERMES_DASHBOARD_INSECURE: '1'
+  command:
+  - gateway
+  - run

@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
-use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sts::Client as StsClient;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
@@ -26,7 +26,10 @@ fn is_remote(s: &str) -> bool {
     parse_remote(s).is_some()
 }
 
-async fn get_staging_bucket(config: &aws_config::SdkConfig, bucket: Option<&str>) -> Result<String> {
+async fn get_staging_bucket(
+    config: &aws_config::SdkConfig,
+    bucket: Option<&str>,
+) -> Result<String> {
     if let Some(b) = bucket {
         return Ok(b.to_string());
     }
@@ -48,7 +51,9 @@ async fn ensure_bucket(s3: &S3Client, bucket: &str, region: &str) -> Result<()> 
                         .build(),
                 );
             }
-            req.send().await.context("failed to create staging bucket")?;
+            req.send()
+                .await
+                .context("failed to create staging bucket")?;
             eprintln!("✓ Created staging bucket: {bucket}");
             Ok(())
         }
@@ -115,7 +120,10 @@ async fn upload(
 
     // 3. ECS Exec: download from presigned URL inside container
     let dest = if remote_path.is_empty() {
-        let filename = std::path::Path::new(local_path).file_name().unwrap_or_default().to_string_lossy();
+        let filename = std::path::Path::new(local_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
         format!("$HOME/{filename}")
     } else {
         remote_path.to_string()
@@ -164,7 +172,10 @@ async fn download(
 
     // 3. Download from S3 to local
     let local_dest = if std::path::Path::new(local_path).is_dir() {
-        let filename = std::path::Path::new(remote_path).file_name().unwrap_or_default().to_string_lossy();
+        let filename = std::path::Path::new(remote_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
         format!("{}/{}", local_path.trim_end_matches('/'), filename)
     } else {
         local_path.to_string()
@@ -191,12 +202,17 @@ async fn download(
 fn ecs_exec(cluster: &str, task: &str, container: &str, cmd: &str) -> Result<()> {
     let status = ProcessCommand::new("aws")
         .args([
-            "ecs", "execute-command",
-            "--cluster", cluster,
-            "--task", task,
-            "--container", container,
+            "ecs",
+            "execute-command",
+            "--cluster",
+            cluster,
+            "--task",
+            task,
+            "--container",
+            container,
             "--interactive",
-            "--command", cmd,
+            "--command",
+            cmd,
         ])
         .status()
         .context("failed to run aws ecs execute-command")?;

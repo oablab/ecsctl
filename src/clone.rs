@@ -1,7 +1,12 @@
 use anyhow::Result;
 
 /// Clone a service: export source → rename → apply as new service.
-pub async fn run(config: &aws_config::SdkConfig, source: &str, target_name: &str, overrides: &[String]) -> Result<()> {
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    source: &str,
+    target_name: &str,
+    overrides: &[String],
+) -> Result<()> {
     eprintln!("📋 Exporting {source}...");
     let yaml = crate::export::export_to_yaml(config, source).await?;
 

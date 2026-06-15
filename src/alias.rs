@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use aws_sdk_cloudwatchlogs::Client as LogsClient;
 use aws_sdk_ec2::Client as Ec2Client;
 use aws_sdk_ecs::Client as EcsClient;
-use aws_sdk_cloudwatchlogs::Client as LogsClient;
 
 use crate::config::Config;
 
@@ -67,7 +67,11 @@ async fn lookup_public_ip(ec2: &Ec2Client, eni_id: &str) -> Option<String> {
 }
 
 /// Describe the resolved task for an alias
-pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: Option<&str>) -> Result<()> {
+pub async fn describe(
+    config: &aws_config::SdkConfig,
+    alias_name: &str,
+    output: Option<&str>,
+) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -115,9 +119,15 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: 
             return print_json(config, &ecs, alias_name, &target, cluster, service, &desc).await;
         } else if let Some(template) = fmt.strip_prefix("jsonpath=") {
             let template = template.trim_matches('\'');
-            return print_jsonpath(config, &ecs, alias_name, &target, cluster, service, &desc, template).await;
+            return print_jsonpath(
+                config, &ecs, alias_name, &target, cluster, service, &desc, template,
+            )
+            .await;
         } else {
-            anyhow::bail!("unknown output format '{}': use 'json' or \"jsonpath='<template>'\"", fmt);
+            anyhow::bail!(
+                "unknown output format '{}': use 'json' or \"jsonpath='<template>'\"",
+                fmt
+            );
         }
     }
 
@@ -142,7 +152,10 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: 
             .unwrap_or("UNKNOWN");
         let started = task
             .started_at()
-            .map(|t| t.fmt(aws_sdk_ecs::primitives::DateTimeFormat::DateTime).unwrap_or_default())
+            .map(|t| {
+                t.fmt(aws_sdk_ecs::primitives::DateTimeFormat::DateTime)
+                    .unwrap_or_default()
+            })
             .unwrap_or_else(|| "-".to_string());
         let cpu = task.cpu().unwrap_or("?");
         let memory = task.memory().unwrap_or("?");
@@ -163,7 +176,8 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: 
             .and_then(|r| r.task_definition);
 
         // Get runtime platform from task definition
-        let arch = task_def.as_ref()
+        let arch = task_def
+            .as_ref()
             .and_then(|td| td.runtime_platform().cloned())
             .and_then(|rp| rp.cpu_architecture().cloned())
             .map(|a| a.as_str().to_string())
@@ -209,7 +223,11 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: 
             // Show env vars from task definition
             if !name.starts_with("ecs-service-connect-") {
                 if let Some(ref td) = task_def {
-                    if let Some(container_def) = td.container_definitions().iter().find(|cd| cd.name() == Some(name)) {
+                    if let Some(container_def) = td
+                        .container_definitions()
+                        .iter()
+                        .find(|cd| cd.name() == Some(name))
+                    {
                         let env = container_def.environment();
                         let secrets = container_def.secrets();
                         if !env.is_empty() || !secrets.is_empty() {
@@ -241,13 +259,18 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: 
 
         // Tail last 10 log lines
         if let Some(ref td) = task_def {
-            let app_container = td.container_definitions().iter()
-                .find(|cd| !cd.name().unwrap_or_default().starts_with("ecs-service-connect-"));
+            let app_container = td.container_definitions().iter().find(|cd| {
+                !cd.name()
+                    .unwrap_or_default()
+                    .starts_with("ecs-service-connect-")
+            });
             if let Some(cd) = app_container {
                 if let Some(log_config) = cd.log_configuration() {
                     if log_config.log_driver().as_str() == "awslogs" {
                         if let Some(opts) = log_config.options() {
-                            if let (Some(group), Some(prefix)) = (opts.get("awslogs-group"), opts.get("awslogs-stream-prefix")) {
+                            if let (Some(group), Some(prefix)) =
+                                (opts.get("awslogs-group"), opts.get("awslogs-stream-prefix"))
+                            {
                                 let container_name = cd.name().unwrap_or("app");
                                 let stream_name = format!("{prefix}/{container_name}/{task_id}");
                                 let logs = LogsClient::new(config);
@@ -281,7 +304,6 @@ pub async fn describe(config: &aws_config::SdkConfig, alias_name: &str, output: 
     Ok(())
 }
 
-
 async fn print_json(
     config: &aws_config::SdkConfig,
     ecs: &EcsClient,
@@ -308,7 +330,12 @@ async fn build_json(
     let mut tasks_json = Vec::new();
 
     for task in desc.tasks() {
-        let task_id = task.task_arn().unwrap_or("?").rsplit('/').next().unwrap_or("?");
+        let task_id = task
+            .task_arn()
+            .unwrap_or("?")
+            .rsplit('/')
+            .next()
+            .unwrap_or("?");
         let task_def_arn = task.task_definition_arn().unwrap_or("?");
 
         let task_def = ecs
@@ -319,7 +346,8 @@ async fn build_json(
             .ok()
             .and_then(|r| r.task_definition);
 
-        let arch = task_def.as_ref()
+        let arch = task_def
+            .as_ref()
             .and_then(|td| td.runtime_platform().cloned())
             .and_then(|rp| rp.cpu_architecture().cloned())
             .map(|a| a.as_str().to_string())
@@ -338,7 +366,11 @@ async fn build_json(
 
             if !is_sidecar {
                 if let Some(ref td) = task_def {
-                    if let Some(cd) = td.container_definitions().iter().find(|cd| cd.name() == Some(name)) {
+                    if let Some(cd) = td
+                        .container_definitions()
+                        .iter()
+                        .find(|cd| cd.name() == Some(name))
+                    {
                         let mut env = serde_json::Map::new();
                         for kv in cd.environment() {
                             let k = kv.name().unwrap_or("?");
@@ -347,7 +379,10 @@ async fn build_json(
                         }
                         let mut secrets = serde_json::Map::new();
                         for s in cd.secrets() {
-                            secrets.insert(s.name().to_string(), serde_json::Value::String(s.value_from().to_string()));
+                            secrets.insert(
+                                s.name().to_string(),
+                                serde_json::Value::String(s.value_from().to_string()),
+                            );
                         }
                         cj["env"] = serde_json::Value::Object(env);
                         cj["secrets"] = serde_json::Value::Object(secrets);
@@ -517,21 +552,32 @@ pub async fn resolve(config: &aws_config::SdkConfig, alias_or_target: &str) -> R
         2 => {
             // cluster/service — find newest task + resolve container name from task def
             let (cluster, service) = (parts[0], parts[1]);
-            let (task_id, container) = find_newest_task_with_container(config, cluster, service).await?;
+            let (task_id, container) =
+                find_newest_task_with_container(config, cluster, service).await?;
             Ok(format!("{cluster}/{task_id}/{container}"))
         }
-        _ => anyhow::bail!("invalid alias target: '{target}' (expected cluster/service[/container[/task_id]])"),
+        _ => anyhow::bail!(
+            "invalid alias target: '{target}' (expected cluster/service[/container[/task_id]])"
+        ),
     }
 }
 
 /// Find the newest RUNNING task ARN for a service, return just the task ID
-async fn find_newest_task(config: &aws_config::SdkConfig, cluster: &str, service: &str) -> Result<String> {
+async fn find_newest_task(
+    config: &aws_config::SdkConfig,
+    cluster: &str,
+    service: &str,
+) -> Result<String> {
     let (task_id, _) = find_newest_task_with_container(config, cluster, service).await?;
     Ok(task_id)
 }
 
 /// Find the newest RUNNING task for a service, return (task_id, container_name)
-async fn find_newest_task_with_container(config: &aws_config::SdkConfig, cluster: &str, service: &str) -> Result<(String, String)> {
+async fn find_newest_task_with_container(
+    config: &aws_config::SdkConfig,
+    cluster: &str,
+    service: &str,
+) -> Result<(String, String)> {
     let ecs = EcsClient::new(config);
 
     let resp = ecs
@@ -565,7 +611,10 @@ async fn find_newest_task_with_container(config: &aws_config::SdkConfig, cluster
 
     // Extract task ID from ARN
     let arn = newest.task_arn().context("task has no ARN")?;
-    let task_id = arn.rsplit('/').next().context("cannot parse task ID from ARN")?;
+    let task_id = arn
+        .rsplit('/')
+        .next()
+        .context("cannot parse task ID from ARN")?;
 
     // Get the app container name (skip ECS Service Connect sidecars)
     let container_name = newest
