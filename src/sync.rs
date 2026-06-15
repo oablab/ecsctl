@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sts::Client as StsClient;
 use std::process::Command;
 use std::time::Duration;
@@ -18,7 +18,10 @@ fn parse_remote(s: &str) -> Result<(&str, &str, &str, &str)> {
     }
 }
 
-async fn get_staging_bucket(config: &aws_config::SdkConfig, bucket: Option<&str>) -> Result<String> {
+async fn get_staging_bucket(
+    config: &aws_config::SdkConfig,
+    bucket: Option<&str>,
+) -> Result<String> {
     if let Some(b) = bucket {
         return Ok(b.to_string());
     }
@@ -74,12 +77,17 @@ pub async fn run(
 
     let status = Command::new("aws")
         .args([
-            "ecs", "execute-command",
-            "--cluster", cluster,
-            "--task", task,
-            "--container", container,
+            "ecs",
+            "execute-command",
+            "--cluster",
+            cluster,
+            "--task",
+            task,
+            "--container",
+            container,
             "--interactive",
-            "--command", &cmd,
+            "--command",
+            &cmd,
         ])
         .status()
         .context("failed to run aws ecs execute-command")?;
@@ -89,7 +97,11 @@ pub async fn run(
     }
 
     // 5. Cleanup
-    s3.delete_object().bucket(&staging_bucket).key(&key).send().await?;
+    s3.delete_object()
+        .bucket(&staging_bucket)
+        .key(&key)
+        .send()
+        .await?;
     eprintln!("✓ Synced {local_dir} → {cluster}/{task}/{container}:{remote_path}");
     Ok(())
 }

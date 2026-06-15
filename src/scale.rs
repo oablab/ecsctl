@@ -11,7 +11,13 @@ fn validate_count(count: i32) -> Result<()> {
 }
 
 /// Core scaling logic — takes an EcsClient directly for testability.
-pub async fn scale_service(ecs: &EcsClient, cluster: &str, service: &str, count: i32, wait: bool) -> Result<()> {
+pub async fn scale_service(
+    ecs: &EcsClient,
+    cluster: &str,
+    service: &str,
+    count: i32,
+    wait: bool,
+) -> Result<()> {
     eprintln!("⚖️  Scaling {service} to {count}...");
     ecs.update_service()
         .cluster(cluster)

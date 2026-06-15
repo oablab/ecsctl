@@ -17,7 +17,11 @@ use clap::{Parser, Subcommand};
 use config::Config;
 
 #[derive(Parser)]
-#[command(name = "ecsctl", version, about = "kubectl-style CLI for AWS ECS Fargate")]
+#[command(
+    name = "ecsctl",
+    version,
+    about = "kubectl-style CLI for AWS ECS Fargate"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -169,7 +173,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
 
     match cli.command {
-        Command::Apply { file, overrides, wait } => {
+        Command::Apply {
+            file,
+            overrides,
+            wait,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             apply::run(&aws_config, &file, &overrides, wait).await
         }
@@ -185,11 +193,19 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             scale::run(&aws_config, &name, count, wait).await
         }
-        Command::Update { name, overrides, wait } => {
+        Command::Update {
+            name,
+            overrides,
+            wait,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             update::run(&aws_config, &name, &overrides, wait).await
         }
-        Command::Clone { source, target, overrides } => {
+        Command::Clone {
+            source,
+            target,
+            overrides,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             clone::run(&aws_config, &source, &target, &overrides).await
         }
@@ -206,14 +222,15 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             alias::describe(&aws_config, &name, output.as_deref()).await
         }
-        Command::Log { name, lines, follow } => {
+        Command::Log {
+            name,
+            lines,
+            follow,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             logs::run(&aws_config, &name, lines, follow).await
         }
-        Command::Exec {
-            target,
-            command,
-        } => {
+        Command::Exec { target, command } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let resolved = alias::resolve(&aws_config, &target).await?;
             let cmd = if command.is_empty() {
@@ -257,7 +274,7 @@ async fn resolve_remote_alias(config: &aws_config::SdkConfig, s: &str) -> anyhow
     if let Some(colon_pos) = s.find(':') {
         let prefix = &s[..colon_pos];
         let path = &s[colon_pos..]; // includes the ':'
-        // If prefix doesn't contain '/' it might be an alias
+                                    // If prefix doesn't contain '/' it might be an alias
         if !prefix.contains('/') {
             let resolved = alias::resolve(config, prefix).await?;
             if resolved != prefix {

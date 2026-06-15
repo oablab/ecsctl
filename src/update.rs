@@ -16,7 +16,12 @@ fn validate_overrides(overrides: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, overrides: &[String], wait: bool) -> Result<()> {
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    name: &str,
+    overrides: &[String],
+    wait: bool,
+) -> Result<()> {
     validate_overrides(overrides)?;
 
     // Guard: abort if service has sidecar containers that would be silently dropped
@@ -66,7 +71,11 @@ async fn check_no_sidecars(config: &aws_config::SdkConfig, name: &str) -> Result
     let non_system: Vec<_> = td
         .container_definitions()
         .iter()
-        .filter(|c| !c.name().unwrap_or_default().starts_with("ecs-service-connect-"))
+        .filter(|c| {
+            !c.name()
+                .unwrap_or_default()
+                .starts_with("ecs-service-connect-")
+        })
         .collect();
 
     if non_system.len() > 1 {
@@ -126,22 +135,21 @@ mod tests {
 
     /// Helper: build a mock ECS client that returns a service with given container definitions.
     fn mock_ecs_with_containers(containers: Vec<ContainerDefinition>) -> aws_sdk_ecs::Client {
-        let describe_svc_rule = mock!(aws_sdk_ecs::Client::describe_services)
-            .then_output(|| {
-                DescribeServicesOutput::builder()
-                    .services(
-                        Service::builder()
-                            .service_name("test-svc")
-                            .status("ACTIVE")
-                            .task_definition("arn:aws:ecs:us-east-1:123:task-definition/test:1")
-                            .build(),
-                    )
-                    .build()
-            });
+        let describe_svc_rule = mock!(aws_sdk_ecs::Client::describe_services).then_output(|| {
+            DescribeServicesOutput::builder()
+                .services(
+                    Service::builder()
+                        .service_name("test-svc")
+                        .status("ACTIVE")
+                        .task_definition("arn:aws:ecs:us-east-1:123:task-definition/test:1")
+                        .build(),
+                )
+                .build()
+        });
 
         let containers_clone = containers.clone();
-        let describe_td_rule = mock!(aws_sdk_ecs::Client::describe_task_definition)
-            .then_output(move || {
+        let describe_td_rule =
+            mock!(aws_sdk_ecs::Client::describe_task_definition).then_output(move || {
                 let mut td_builder = TaskDefinition::builder();
                 for c in &containers_clone {
                     td_builder = td_builder.container_definitions(c.clone());
@@ -151,14 +159,16 @@ mod tests {
                     .build()
             });
 
-        mock_client!(aws_sdk_ecs, RuleMode::MatchAny, [&describe_svc_rule, &describe_td_rule])
+        mock_client!(
+            aws_sdk_ecs,
+            RuleMode::MatchAny,
+            [&describe_svc_rule, &describe_td_rule]
+        )
     }
 
     #[tokio::test]
     async fn test_sidecar_guard_single_container_passes() {
-        let containers = vec![
-            ContainerDefinition::builder().name("app").build(),
-        ];
+        let containers = vec![ContainerDefinition::builder().name("app").build()];
         let ecs = mock_ecs_with_containers(containers);
 
         // check_no_sidecars needs Config with alias — we test the logic via the ECS client directly
@@ -170,7 +180,11 @@ mod tests {
         let non_system: Vec<_> = td
             .container_definitions()
             .iter()
-            .filter(|c| !c.name().unwrap_or_default().starts_with("ecs-service-connect-"))
+            .filter(|c| {
+                !c.name()
+                    .unwrap_or_default()
+                    .starts_with("ecs-service-connect-")
+            })
             .collect();
 
         assert_eq!(non_system.len(), 1);
@@ -186,7 +200,11 @@ mod tests {
         let non_system: Vec<_> = td
             .container_definitions()
             .iter()
-            .filter(|c| !c.name().unwrap_or_default().starts_with("ecs-service-connect-"))
+            .filter(|c| {
+                !c.name()
+                    .unwrap_or_default()
+                    .starts_with("ecs-service-connect-")
+            })
             .collect();
 
         assert_eq!(non_system.len(), 2); // should trigger bail in real code
@@ -197,14 +215,20 @@ mod tests {
         let td = TaskDefinition::builder()
             .container_definitions(ContainerDefinition::builder().name("app").build())
             .container_definitions(
-                ContainerDefinition::builder().name("ecs-service-connect-proxy").build(),
+                ContainerDefinition::builder()
+                    .name("ecs-service-connect-proxy")
+                    .build(),
             )
             .build();
 
         let non_system: Vec<_> = td
             .container_definitions()
             .iter()
-            .filter(|c| !c.name().unwrap_or_default().starts_with("ecs-service-connect-"))
+            .filter(|c| {
+                !c.name()
+                    .unwrap_or_default()
+                    .starts_with("ecs-service-connect-")
+            })
             .collect();
 
         assert_eq!(non_system.len(), 1); // service-connect is ignored

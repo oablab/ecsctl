@@ -19,9 +19,33 @@ pub struct Metadata {
     pub cluster: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(default = "default_essential")]
+    pub essential: bool,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub secrets: HashMap<String, String>,
+    #[serde(default)]
+    pub log_group: Option<String>,
+}
+
+fn default_essential() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Spec {
+    #[serde(default)]
     pub image: String,
     pub cpu: String,
     pub memory: String,
@@ -50,14 +74,27 @@ pub struct Spec {
     pub port: u16,
     #[serde(default)]
     pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub containers: Option<Vec<ContainerSpec>>,
 }
 
 const VALID_FARGATE_SIZING: &[(u32, &[u32])] = &[
     (256, &[512, 1024, 2048]),
     (512, &[1024, 2048, 3072, 4096]),
     (1024, &[2048, 3072, 4096, 5120, 6144, 7168, 8192]),
-    (2048, &[4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]),
-    (4096, &[8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]),
+    (
+        2048,
+        &[
+            4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384,
+        ],
+    ),
+    (
+        4096,
+        &[
+            8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456,
+            20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720,
+        ],
+    ),
 ];
 
 impl ServiceSpec {
@@ -73,12 +110,21 @@ impl ServiceSpec {
         // Validate capacity
         match spec.capacity.as_str() {
             "FARGATE" | "FARGATE_SPOT" => {}
-            other => anyhow::bail!("invalid capacity '{}': expected FARGATE or FARGATE_SPOT", other),
+            other => anyhow::bail!(
+                "invalid capacity '{}': expected FARGATE or FARGATE_SPOT",
+                other
+            ),
         }
 
         // Validate cpu/memory combination
-        let cpu: u32 = spec.cpu.parse().context("cpu must be a number (e.g. \"256\")")?;
-        let mem: u32 = spec.memory.parse().context("memory must be a number (e.g. \"512\")")?;
+        let cpu: u32 = spec
+            .cpu
+            .parse()
+            .context("cpu must be a number (e.g. \"256\")")?;
+        let mem: u32 = spec
+            .memory
+            .parse()
+            .context("memory must be a number (e.g. \"512\")")?;
 
         let valid_mems = VALID_FARGATE_SIZING
             .iter()
@@ -87,12 +133,24 @@ impl ServiceSpec {
 
         match valid_mems {
             None => {
-                let valid_cpus: Vec<_> = VALID_FARGATE_SIZING.iter().map(|(c, _)| c.to_string()).collect();
-                anyhow::bail!("invalid cpu '{}': valid values are {}", cpu, valid_cpus.join(", "));
+                let valid_cpus: Vec<_> = VALID_FARGATE_SIZING
+                    .iter()
+                    .map(|(c, _)| c.to_string())
+                    .collect();
+                anyhow::bail!(
+                    "invalid cpu '{}': valid values are {}",
+                    cpu,
+                    valid_cpus.join(", ")
+                );
             }
             Some(mems) if !mems.contains(&mem) => {
                 let opts: Vec<_> = mems.iter().map(|m| m.to_string()).collect();
-                anyhow::bail!("invalid memory '{}' for cpu '{}': valid values are {}", mem, cpu, opts.join(", "));
+                anyhow::bail!(
+                    "invalid memory '{}' for cpu '{}': valid values are {}",
+                    mem,
+                    cpu,
+                    opts.join(", ")
+                );
             }
             _ => {}
         }
@@ -106,10 +164,18 @@ impl ServiceSpec {
     }
 }
 
-fn default_arch() -> String { "X86_64".to_string() }
-fn default_capacity() -> String { "FARGATE".to_string() }
-fn default_count() -> i32 { 1 }
-fn default_port() -> u16 { 0 }
+fn default_arch() -> String {
+    "X86_64".to_string()
+}
+fn default_capacity() -> String {
+    "FARGATE".to_string()
+}
+fn default_count() -> i32 {
+    1
+}
+fn default_port() -> u16 {
+    0
+}
 
 fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Result<()> {
     let parts: Vec<&str> = path.split('.').collect();
@@ -119,7 +185,9 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
         if i == parts.len() - 1 {
             // Check original type to preserve it
             let existing = &current[*part];
-            let yaml_val = if existing.is_bool() || (existing.is_null() && (value == "true" || value == "false")) {
+            let yaml_val = if existing.is_bool()
+                || (existing.is_null() && (value == "true" || value == "false"))
+            {
                 serde_yaml::Value::Bool(value.parse::<bool>().unwrap_or(false))
             } else if existing.is_number() {
                 // Original field is a number, keep as number
@@ -143,53 +211,31 @@ fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Resu
     Ok(())
 }
 
-pub async fn run(config: &aws_config::SdkConfig, file: &str, overrides: &[String], wait: bool) -> Result<()> {
-    let content = crate::loader::load(file).await?;
-    run_from_string(config, &content, overrides, wait).await
-}
+fn build_container_def(
+    cs: &ContainerSpec,
+    service_name: &str,
+    region: &str,
+) -> Result<aws_sdk_ecs::types::ContainerDefinition> {
+    let mut builder = aws_sdk_ecs::types::ContainerDefinition::builder()
+        .name(&cs.name)
+        .image(&cs.image)
+        .essential(cs.essential);
 
-/// Apply from a YAML string (used by clone).
-pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, overrides: &[String], wait: bool) -> Result<()> {
-    let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(content).context("failed to parse YAML")?;
-
-    // Apply --set overrides
-    for entry in overrides {
-        let (key, value) = entry.split_once('=').context(format!("invalid --set format '{}': expected KEY=VALUE", entry))?;
-        set_yaml_field(&mut yaml_value, key, value)?;
+    if let Some(ref cmd) = cs.command {
+        builder = builder.set_command(Some(cmd.clone()));
     }
 
-    let spec: ServiceSpec = serde_yaml::from_value(yaml_value).context("failed to parse spec after overrides")?;
-    spec.validate()?;
-
-    let ecs = EcsClient::new(config);
-    let cluster = &spec.metadata.cluster;
-    let service_name = &spec.metadata.name;
-    let container_name = spec.spec.container_name.as_deref().unwrap_or("app");
-    let family = format!("{service_name}");
-
-    // 1. Register task definition
-    eprintln!("📋 Registering task definition...");
-
-    let mut container_def = aws_sdk_ecs::types::ContainerDefinition::builder()
-        .name(container_name)
-        .image(&spec.spec.image)
-        .essential(true);
-
-    if let Some(ref cmd) = spec.spec.command {
-        container_def = container_def.set_command(Some(cmd.clone()));
-    }
-
-    if spec.spec.port > 0 {
-        container_def = container_def.port_mappings(
+    if cs.port > 0 {
+        builder = builder.port_mappings(
             aws_sdk_ecs::types::PortMapping::builder()
-                .container_port(spec.spec.port as i32)
+                .container_port(cs.port as i32)
                 .protocol(aws_sdk_ecs::types::TransportProtocol::Tcp)
                 .build(),
         );
     }
 
-    for (k, v) in &spec.spec.env {
-        container_def = container_def.environment(
+    for (k, v) in &cs.env {
+        builder = builder.environment(
             aws_sdk_ecs::types::KeyValuePair::builder()
                 .name(k)
                 .value(v)
@@ -197,8 +243,8 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
         );
     }
 
-    for (k, v) in &spec.spec.secrets {
-        container_def = container_def.secrets(
+    for (k, v) in &cs.secrets {
+        builder = builder.secrets(
             aws_sdk_ecs::types::Secret::builder()
                 .name(k)
                 .value_from(v)
@@ -206,17 +252,63 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
         );
     }
 
-    if let Some(ref log_group) = spec.spec.log_group {
-        let region = config.region().map(|r| r.as_ref()).unwrap_or("us-east-1");
-        container_def = container_def.log_configuration(
+    if let Some(ref log_group) = cs.log_group {
+        builder = builder.log_configuration(
             aws_sdk_ecs::types::LogConfiguration::builder()
                 .log_driver(aws_sdk_ecs::types::LogDriver::Awslogs)
                 .options("awslogs-group", log_group.as_str())
                 .options("awslogs-region", region)
-                .options("awslogs-stream-prefix", service_name.as_str())
+                .options("awslogs-stream-prefix", service_name)
                 .build()?,
         );
     }
+
+    Ok(builder.build())
+}
+
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    file: &str,
+    overrides: &[String],
+    wait: bool,
+) -> Result<()> {
+    let content = crate::loader::load(file).await?;
+    run_from_string(config, &content, overrides, wait).await
+}
+
+/// Apply from a YAML string (used by clone).
+pub async fn run_from_string(
+    config: &aws_config::SdkConfig,
+    content: &str,
+    overrides: &[String],
+    wait: bool,
+) -> Result<()> {
+    let mut yaml_value: serde_yaml::Value =
+        serde_yaml::from_str(content).context("failed to parse YAML")?;
+
+    // Apply --set overrides
+    for entry in overrides {
+        let (key, value) = entry.split_once('=').context(format!(
+            "invalid --set format '{}': expected KEY=VALUE",
+            entry
+        ))?;
+        set_yaml_field(&mut yaml_value, key, value)?;
+    }
+
+    let spec: ServiceSpec =
+        serde_yaml::from_value(yaml_value).context("failed to parse spec after overrides")?;
+    spec.validate()?;
+
+    let ecs = EcsClient::new(config);
+    let cluster = &spec.metadata.cluster;
+    let service_name = &spec.metadata.name;
+    let container_name = spec.spec.container_name.as_deref().unwrap_or("app");
+    let family = service_name.to_string();
+
+    // 1. Register task definition
+    eprintln!("📋 Registering task definition...");
+
+    let region = config.region().map(|r| r.as_ref()).unwrap_or("us-east-1");
 
     let mut task_def_req = ecs
         .register_task_definition()
@@ -230,8 +322,29 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
                 .cpu_architecture(spec.spec.arch.as_str().into())
                 .operating_system_family(aws_sdk_ecs::types::OsFamily::Linux)
                 .build(),
-        )
-        .container_definitions(container_def.build());
+        );
+
+    if let Some(ref containers) = spec.spec.containers {
+        // Multi-container mode
+        for cs in containers {
+            let cd = build_container_def(cs, service_name, region)?;
+            task_def_req = task_def_req.container_definitions(cd);
+        }
+    } else {
+        // Single-container mode (backward-compatible)
+        let cs = ContainerSpec {
+            name: container_name.to_string(),
+            image: spec.spec.image.clone(),
+            essential: true,
+            port: spec.spec.port,
+            command: spec.spec.command.clone(),
+            env: spec.spec.env.clone(),
+            secrets: spec.spec.secrets.clone(),
+            log_group: spec.spec.log_group.clone(),
+        };
+        let cd = build_container_def(&cs, service_name, region)?;
+        task_def_req = task_def_req.container_definitions(cd);
+    }
 
     if let Some(ref role) = spec.spec.execution_role_arn {
         task_def_req = task_def_req.execution_role_arn(role);
@@ -240,7 +353,10 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
         task_def_req = task_def_req.task_role_arn(role);
     }
 
-    let task_def_resp = task_def_req.send().await.context("RegisterTaskDefinition failed")?;
+    let task_def_resp = task_def_req
+        .send()
+        .await
+        .context("RegisterTaskDefinition failed")?;
     let task_def_arn = task_def_resp
         .task_definition()
         .and_then(|td| td.task_definition_arn())
@@ -319,14 +435,12 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
 
         if spec.spec.capacity == "FARGATE_SPOT" {
             // Must clear launch_type when using capacity provider
-            create = create
-                .set_launch_type(None)
-                .capacity_provider_strategy(
-                    aws_sdk_ecs::types::CapacityProviderStrategyItem::builder()
-                        .capacity_provider("FARGATE_SPOT")
-                        .weight(1)
-                        .build()?,
-                );
+            create = create.set_launch_type(None).capacity_provider_strategy(
+                aws_sdk_ecs::types::CapacityProviderStrategyItem::builder()
+                    .capacity_provider("FARGATE_SPOT")
+                    .weight(1)
+                    .build()?,
+            );
         }
 
         create.send().await.context("CreateService failed")?;
@@ -337,7 +451,8 @@ pub async fn run_from_string(config: &aws_config::SdkConfig, content: &str, over
     let mut cfg = crate::config::Config::load()?;
     let alias_target = format!("{cluster}/{service_name}");
     if !cfg.aliases.values().any(|v| v == &alias_target) {
-        cfg.aliases.insert(service_name.clone(), alias_target.clone());
+        cfg.aliases
+            .insert(service_name.clone(), alias_target.clone());
         cfg.save()?;
         eprintln!("  ✓ Alias '{service_name}' → {alias_target}");
     }
@@ -379,25 +494,39 @@ pub async fn wait_for_stable(ecs: &EcsClient, cluster: &str, service: &str) -> R
                 eprintln!();
                 return Ok(());
             }
-            if desired == 0 && d.rollout_state() == Some(&aws_sdk_ecs::types::DeploymentRolloutState::Completed) {
+            if desired == 0
+                && d.rollout_state() == Some(&aws_sdk_ecs::types::DeploymentRolloutState::Completed)
+            {
                 eprint!("\r  ✅ scaled to 0 (deployment complete)                    ");
                 eprintln!();
                 return Ok(());
             }
             eprint!("\r  🚀 {running}/{desired} tasks running");
         } else {
-            let primary = deployments.iter().find(|d| d.status().unwrap_or_default() == "PRIMARY");
-            let old_count: i32 = deployments.iter()
+            let primary = deployments
+                .iter()
+                .find(|d| d.status().unwrap_or_default() == "PRIMARY");
+            let old_count: i32 = deployments
+                .iter()
                 .filter(|d| d.status().unwrap_or_default() != "PRIMARY")
                 .map(|d| d.running_count())
                 .sum();
             if let Some(d) = primary {
                 if d.running_count() == d.desired_count() && old_count == 0 {
-                    eprint!("\r  ✅ {}/{} tasks running                    ", d.running_count(), d.desired_count());
+                    eprint!(
+                        "\r  ✅ {}/{} tasks running                    ",
+                        d.running_count(),
+                        d.desired_count()
+                    );
                     eprintln!();
                     return Ok(());
                 }
-                eprint!("\r  🔄 new: {}/{} running, draining {} old task(s)...", d.running_count(), d.desired_count(), old_count);
+                eprint!(
+                    "\r  🔄 new: {}/{} running, draining {} old task(s)...",
+                    d.running_count(),
+                    d.desired_count(),
+                    old_count
+                );
             }
         }
     }
@@ -482,4 +611,34 @@ spec:
         let spec: ServiceSpec = serde_yaml::from_value(val).unwrap();
         assert!(spec.spec.exec_enabled);
     }
+}
+
+#[test]
+fn test_parse_multi_container_spec() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: multi-app
+  cluster: test-cluster
+spec:
+  cpu: "512"
+  memory: "1024"
+  capacity: FARGATE_SPOT
+  containers:
+    - name: app
+      image: nginx:latest
+      essential: true
+      port: 80
+    - name: sidecar
+      image: envoy:latest
+      essential: false
+      port: 9901
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(spec.spec.containers.as_ref().unwrap().len(), 2);
+    assert_eq!(spec.spec.containers.as_ref().unwrap()[0].name, "app");
+    assert!(spec.spec.containers.as_ref().unwrap()[0].essential);
+    assert!(!spec.spec.containers.as_ref().unwrap()[1].essential);
+    assert!(spec.validate().is_ok());
 }
