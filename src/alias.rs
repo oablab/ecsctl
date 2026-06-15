@@ -429,6 +429,7 @@ async fn build_json(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn print_jsonpath(
     config: &aws_config::SdkConfig,
     ecs: &EcsClient,
