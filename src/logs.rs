@@ -25,8 +25,10 @@ pub async fn run(
 
     let ecs = EcsClient::new(config);
 
-    // Find newest running task
-    let tasks_resp = ecs
+    // Find newest task (running or stopped)
+    let mut task_arns: Vec<String> = Vec::new();
+
+    let running_resp = ecs
         .list_tasks()
         .cluster(cluster)
         .service_name(service)
@@ -34,10 +36,23 @@ pub async fn run(
         .send()
         .await
         .context("ListTasks failed")?;
+    task_arns.extend(running_resp.task_arns().iter().cloned());
 
-    let task_arns = tasks_resp.task_arns();
     if task_arns.is_empty() {
-        anyhow::bail!("no RUNNING tasks for '{name}'");
+        // No running tasks — try stopped tasks for crash logs
+        let stopped_resp = ecs
+            .list_tasks()
+            .cluster(cluster)
+            .service_name(service)
+            .desired_status(aws_sdk_ecs::types::DesiredStatus::Stopped)
+            .send()
+            .await
+            .context("ListTasks (stopped) failed")?;
+        task_arns.extend(stopped_resp.task_arns().iter().cloned());
+    }
+
+    if task_arns.is_empty() {
+        anyhow::bail!("no tasks found for '{name}' (running or recently stopped)");
     }
 
     let desc = ecs
@@ -50,9 +65,8 @@ pub async fn run(
     let task = desc
         .tasks()
         .iter()
-        .filter(|t| t.last_status() == Some("RUNNING"))
         .max_by_key(|t| t.started_at())
-        .context("no RUNNING tasks")?;
+        .context("no tasks found")?;
 
     let task_id = task
         .task_arn()
