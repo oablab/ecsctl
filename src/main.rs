@@ -55,6 +55,9 @@ enum Command {
     Exec {
         /// alias or cluster/task/container
         target: String,
+        /// Run in non-interactive mode (capture output, no PTY)
+        #[arg(long)]
+        non_interactive: bool,
         /// Command to run (default: /bin/sh)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -230,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             logs::run(&aws_config, &name, lines, follow).await
         }
-        Command::Exec { target, command } => {
+        Command::Exec { target, non_interactive, command } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let resolved = alias::resolve(&aws_config, &target).await?;
             let cmd = if command.is_empty() {
@@ -238,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 Some(command.join(" "))
             };
-            exec::run(&aws_config, &resolved, cmd.as_deref()).await
+            exec::run(&aws_config, &resolved, cmd.as_deref(), non_interactive).await
         }
         Command::Cp {
             src,

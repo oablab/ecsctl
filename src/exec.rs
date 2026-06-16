@@ -16,12 +16,17 @@ pub async fn run(
     _config: &aws_config::SdkConfig,
     target: &str,
     command: Option<&str>,
+    non_interactive: bool,
 ) -> Result<()> {
     let (cluster, task, container) = parse_target(target)?;
     let cmd = command.unwrap_or("/bin/sh");
 
-    // ECS Exec only supports interactive mode — always shell out to aws CLI
-    // (SSM plugin handles the WebSocket session)
+    let interactive_flag = if non_interactive {
+        "--non-interactive"
+    } else {
+        "--interactive"
+    };
+
     let status = ProcessCommand::new("aws")
         .args([
             "ecs",
@@ -32,7 +37,7 @@ pub async fn run(
             task,
             "--container",
             container,
-            "--interactive",
+            interactive_flag,
             "--command",
             cmd,
         ])
