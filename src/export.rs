@@ -4,7 +4,12 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    name: &str,
+    output: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
