@@ -125,6 +125,9 @@ enum Command {
         /// Output file (default: stdout)
         #[arg(short = 'f', long = "file")]
         output: Option<String>,
+        /// Output as JSON instead of YAML
+        #[arg(long)]
+        json: bool,
     },
     /// Manage aliases for cluster/service/container targets
     Alias {
@@ -209,9 +212,9 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             clone::run(&aws_config, &source, &target, &overrides).await
         }
-        Command::Export { name, output } => {
+        Command::Export { name, output, json } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            export::run(&aws_config, &name, output.as_deref()).await
+            export::run(&aws_config, &name, output.as_deref(), json).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
