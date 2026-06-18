@@ -106,6 +106,92 @@ pub async fn run(
     Ok(())
 }
 
+pub async fn run_download(
+    config: &aws_config::SdkConfig,
+    remote: &str,
+    local_dir: &str,
+    bucket: Option<&str>,
+    presign_expiry_secs: u64,
+) -> Result<()> {
+    let (cluster, task, container, remote_path) = parse_remote(remote)?;
+    let s3 = S3Client::new(config);
+    let staging_bucket = get_staging_bucket(config, bucket).await?;
+    let key = format!("ecsctl/{}.tar.gz", uuid::Uuid::new_v4());
+    let expiry = Duration::from_secs(presign_expiry_secs);
+
+    // 1. Generate presigned PUT URL
+    let presigned = s3
+        .put_object()
+        .bucket(&staging_bucket)
+        .key(&key)
+        .presigned(PresigningConfig::expires_in(expiry)?)
+        .await?;
+    let url = presigned.uri();
+
+    // 2. ECS Exec: tar + upload to S3
+    let cmd = format!(
+        "sh -c 'tar czf - -C \"{}\" . | curl -sf -T - \"{}\"'",
+        remote_path, url
+    );
+    eprintln!("📦 Compressing {remote_path} inside container...");
+
+    let status = Command::new("aws")
+        .args([
+            "ecs",
+            "execute-command",
+            "--cluster",
+            cluster,
+            "--task",
+            task,
+            "--container",
+            container,
+            "--interactive",
+            "--command",
+            &cmd,
+        ])
+        .status()
+        .context("failed to run aws ecs execute-command")?;
+
+    if !status.success() {
+        anyhow::bail!("ecs exec failed with status {}", status);
+    }
+
+    // 3. Download from S3
+    eprintln!("⬇ Downloading from s3://{staging_bucket}/{key}...");
+    let resp = s3
+        .get_object()
+        .bucket(&staging_bucket)
+        .key(&key)
+        .send()
+        .await
+        .context("S3 GetObject failed")?;
+    let bytes = resp.body.collect().await?.into_bytes();
+    eprintln!("   {:.1} KB", bytes.len() as f64 / 1024.0);
+
+    // 4. Extract locally
+    eprintln!("📦 Extracting to {local_dir}...");
+    std::fs::create_dir_all(local_dir)?;
+    let mut child = Command::new("tar")
+        .args(["xzf", "-", "-C", local_dir])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to run tar")?;
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), &bytes)?;
+    let tar_status = child.wait()?;
+    if !tar_status.success() {
+        anyhow::bail!("tar extract failed with status {}", tar_status);
+    }
+
+    // 5. Cleanup
+    s3.delete_object()
+        .bucket(&staging_bucket)
+        .key(&key)
+        .send()
+        .await?;
+    eprintln!("✓ Synced {cluster}/{task}/{container}:{remote_path} → {local_dir}");
+    Ok(())
+}
+
 /// Tar + gzip a directory into memory
 fn tar_dir(path: &str) -> Result<Vec<u8>> {
     use std::io::Write;
