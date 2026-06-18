@@ -130,7 +130,7 @@ pub async fn run_download(
 
     // 2. ECS Exec: tar + upload to S3
     let cmd = format!(
-        "sh -c 'tar czf - -C \"{}\" . | curl -sf -T - \"{}\"'",
+        "sh -c 'tar czf /tmp/_ecsctl_sync.tar.gz -C \"{}\" . && curl -sf -T /tmp/_ecsctl_sync.tar.gz \"{}\" && rm -f /tmp/_ecsctl_sync.tar.gz'",
         remote_path, url
     );
     eprintln!("📦 Compressing {remote_path} inside container...");
