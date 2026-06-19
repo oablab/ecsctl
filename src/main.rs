@@ -1,20 +1,6 @@
-mod alias;
-mod apply;
-mod clone;
-mod config;
-mod cp;
-mod delete;
-mod exec;
-mod export;
-mod loader;
-mod logs;
-mod restart;
-mod scale;
-mod sync;
-mod update;
-
 use clap::{Parser, Subcommand};
-use config::Config;
+use ecsctl::config::Config;
+use ecsctl::{alias, apply, clone, cp, delete, exec, export, logs, restart, scale, sync, update};
 
 #[derive(Parser)]
 #[command(
