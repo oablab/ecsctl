@@ -238,8 +238,8 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
-            let src = resolve_remote_alias(&aws_config, &src).await?;
-            let dst = resolve_remote_alias(&aws_config, &dst).await?;
+            let src = alias::resolve_remote(&aws_config, &src).await?;
+            let dst = alias::resolve_remote(&aws_config, &dst).await?;
             eprintln!("⇄ Copying {} → {} ...", src, dst);
             cp::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await?;
             eprintln!("✓ Done");
@@ -254,8 +254,8 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
-            let src = resolve_remote_alias(&aws_config, &src).await?;
-            let dst = resolve_remote_alias(&aws_config, &dst).await?;
+            let src = alias::resolve_remote(&aws_config, &src).await?;
+            let dst = alias::resolve_remote(&aws_config, &dst).await?;
             let src_remote = src.contains(':') && !src.starts_with('/');
             let dst_remote = dst.contains(':') && !dst.starts_with('/');
             eprintln!("⇄ Syncing {} → {} ...", src, dst);
@@ -272,20 +272,4 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
-}
-
-/// If a string is "alias:/path", resolve the alias part to cluster/task/container:/path
-async fn resolve_remote_alias(config: &aws_config::SdkConfig, s: &str) -> anyhow::Result<String> {
-    if let Some(colon_pos) = s.find(':') {
-        let prefix = &s[..colon_pos];
-        let path = &s[colon_pos..]; // includes the ':'
-                                    // If prefix doesn't contain '/' it might be an alias
-        if !prefix.contains('/') {
-            let resolved = alias::resolve(config, prefix).await?;
-            if resolved != prefix {
-                return Ok(format!("{resolved}{path}"));
-            }
-        }
-    }
-    Ok(s.to_string())
 }
