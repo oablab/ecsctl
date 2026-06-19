@@ -4,7 +4,12 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str>) -> Result<()> {
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    name: &str,
+    output: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let cfg = Config::load()?;
     let target = cfg
         .aliases
@@ -20,15 +25,20 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, output: Option<&str
 
     let ecs = EcsClient::new(config);
     let spec = build_spec(&ecs, cluster, service).await?;
-    let yaml = serde_yaml::to_string(&spec).context("failed to serialize YAML")?;
+
+    let out = if json {
+        serde_json::to_string_pretty(&spec).context("failed to serialize JSON")?
+    } else {
+        serde_yaml::to_string(&spec).context("failed to serialize YAML")?
+    };
 
     match output {
         Some(out_file) => {
-            std::fs::write(out_file, &yaml)?;
+            std::fs::write(out_file, &out)?;
             eprintln!("✓ Exported {cluster}/{service} → {out_file}");
         }
         None => {
-            print!("{yaml}");
+            print!("{out}");
         }
     }
     Ok(())
