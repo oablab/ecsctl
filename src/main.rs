@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use ecsctl::{alias, apply, clone, cp, delete, exec, export, logs, restart, scale, sync, update};
 use ecsctl::config::Config;
+use ecsctl::{alias, apply, clone, cp, delete, exec, export, logs, restart, scale, sync, update};
 
 #[derive(Parser)]
 #[command(
