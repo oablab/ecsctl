@@ -1,20 +1,6 @@
-mod alias;
-mod apply;
-mod clone;
-mod config;
-mod cp;
-mod delete;
-mod exec;
-mod export;
-mod loader;
-mod logs;
-mod restart;
-mod scale;
-mod sync;
-mod update;
-
 use clap::{Parser, Subcommand};
-use config::Config;
+use ecsctl::config::Config;
+use ecsctl::{alias, apply, clone, cp, delete, exec, export, logs, restart, scale, sync, update};
 
 #[derive(Parser)]
 #[command(
@@ -40,11 +26,11 @@ enum Command {
         #[arg(long)]
         presign_expiry: Option<u64>,
     },
-    /// Sync a local directory to a container (tar + upload + extract)
+    /// Sync a directory between local and container (tar + S3)
     Sync {
-        /// Local directory path
+        /// Source: local dir or alias:/path
         src: String,
-        /// Remote target: alias:/path or cluster/task/container:/path
+        /// Destination: alias:/path or local dir
         dst: String,
         #[arg(long)]
         bucket: Option<String>,
@@ -266,8 +252,19 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
+            let src = resolve_remote_alias(&aws_config, &src).await?;
             let dst = resolve_remote_alias(&aws_config, &dst).await?;
-            sync::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+            let src_remote = src.contains(':') && !src.starts_with('/');
+            let dst_remote = dst.contains(':') && !dst.starts_with('/');
+            match (src_remote, dst_remote) {
+                (false, true) => {
+                    sync::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+                }
+                (true, false) => {
+                    sync::run_download(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+                }
+                _ => anyhow::bail!("exactly one of src/dst must be a remote path (alias:/path)"),
+            }
         }
     }
 }
