@@ -238,10 +238,12 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let expiry = presign_expiry.unwrap_or(cfg.presign_expiry_secs());
             let bucket = bucket.or(cfg.bucket);
-            // Resolve aliases in remote paths (the one with ':')
             let src = resolve_remote_alias(&aws_config, &src).await?;
             let dst = resolve_remote_alias(&aws_config, &dst).await?;
-            cp::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+            eprintln!("⇄ Copying {} → {} ...", src, dst);
+            cp::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await?;
+            eprintln!("✓ Done");
+            Ok(())
         }
         Command::Sync {
             src,
@@ -256,15 +258,18 @@ async fn main() -> anyhow::Result<()> {
             let dst = resolve_remote_alias(&aws_config, &dst).await?;
             let src_remote = src.contains(':') && !src.starts_with('/');
             let dst_remote = dst.contains(':') && !dst.starts_with('/');
+            eprintln!("⇄ Syncing {} → {} ...", src, dst);
             match (src_remote, dst_remote) {
                 (false, true) => {
-                    sync::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+                    sync::run(&aws_config, &src, &dst, bucket.as_deref(), expiry).await?;
                 }
                 (true, false) => {
-                    sync::run_download(&aws_config, &src, &dst, bucket.as_deref(), expiry).await
+                    sync::run_download(&aws_config, &src, &dst, bucket.as_deref(), expiry).await?;
                 }
                 _ => anyhow::bail!("exactly one of src/dst must be a remote path (alias:/path)"),
             }
+            eprintln!("✓ Done");
+            Ok(())
         }
     }
 }
