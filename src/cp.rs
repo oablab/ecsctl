@@ -2,16 +2,20 @@ use anyhow::{bail, Context, Result};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sts::Client as StsClient;
-use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-/// Default presigned URL expiry. Must cover: ECS Exec API call (~2s) + SSM session
-/// setup (~3-5s) + command start (~1-2s) + actual file transfer time.
-#[allow(dead_code)]
+use crate::exec;
+
+/// Default presigned URL expiry.
 pub const DEFAULT_PRESIGN_EXPIRY: Duration = Duration::from_secs(60);
 
+/// Escape a string for safe use inside single-quoted shell arguments.
+fn shell_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 /// Parse "cluster/task/container:/remote/path" into parts
-fn parse_remote(s: &str) -> Option<(&str, &str, &str, &str)> {
+pub fn parse_remote(s: &str) -> Option<(&str, &str, &str, &str)> {
     let colon_pos = s.find(':')?;
     let remote_path = &s[colon_pos + 1..];
     let prefix = &s[..colon_pos];
@@ -23,11 +27,11 @@ fn parse_remote(s: &str) -> Option<(&str, &str, &str, &str)> {
     }
 }
 
-fn is_remote(s: &str) -> bool {
+pub fn is_remote(s: &str) -> bool {
     parse_remote(s).is_some()
 }
 
-async fn get_staging_bucket(
+pub async fn get_staging_bucket(
     config: &aws_config::SdkConfig,
     bucket: Option<&str>,
 ) -> Result<String> {
@@ -40,7 +44,7 @@ async fn get_staging_bucket(
     Ok(format!("ecsctl-staging-{account_id}"))
 }
 
-async fn ensure_bucket(s3: &S3Client, bucket: &str, region: &str) -> Result<()> {
+pub async fn ensure_bucket(s3: &S3Client, bucket: &str, region: &str) -> Result<()> {
     match s3.head_bucket().bucket(bucket).send().await {
         Ok(_) => Ok(()),
         Err(_) => {
@@ -55,12 +59,13 @@ async fn ensure_bucket(s3: &S3Client, bucket: &str, region: &str) -> Result<()> 
             req.send()
                 .await
                 .context("failed to create staging bucket")?;
-            eprintln!("✓ Created staging bucket: {bucket}");
             Ok(())
         }
     }
 }
 
+/// Copy a file between local and remote container.
+/// Returns a description of what was done on success.
 pub async fn run(
     config: &aws_config::SdkConfig,
     src: &str,
@@ -97,7 +102,6 @@ async fn upload(
         parse_remote(remote).context("invalid remote path")?;
 
     // 1. Upload local file to S3
-    eprintln!("⬆ Uploading to s3://{bucket}/{key}...");
     let body = aws_sdk_s3::primitives::ByteStream::from_path(local_path)
         .await
         .context("failed to read local file")?;
@@ -129,16 +133,17 @@ async fn upload(
     } else {
         remote_path.to_string()
     };
+    let escaped_dest = shell_escape(&dest);
+    let escaped_url = shell_escape(url);
     let cmd = format!(
-        "sh -c 'curl -sf -o \"{}\" \"{}\" || wget -q -O \"{}\" \"{}\"'",
-        dest, url, dest, url
+        "sh -c 'curl -sf -o '\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"' || wget -q -O '\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"''",
+        escaped_dest, escaped_url, escaped_dest, escaped_url
     );
-    eprintln!("⬇ Downloading inside container to {dest}...");
-    ecs_exec(cluster, task, container, &cmd)?;
+    exec::non_interactive_exec(cluster, task, container, &cmd)
+        .context("failed to download file inside container")?;
 
     // 4. Cleanup S3
     s3.delete_object().bucket(bucket).key(key).send().await?;
-    eprintln!("✓ Copied {local_path} → {cluster}/{task}/{container}:{dest}");
     Ok(())
 }
 
@@ -164,12 +169,14 @@ async fn download(
     let url = presigned.uri();
 
     // 2. ECS Exec: upload from container to S3 via presigned PUT
+    let escaped_path = shell_escape(remote_path);
+    let escaped_url = shell_escape(url);
     let cmd = format!(
-        "sh -c 'curl -sf -T \"{}\" \"{}\" || wget --method=PUT --body-file=\"{}\" \"{}\"'",
-        remote_path, url, remote_path, url
+        "sh -c 'curl -sf -T '\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"' || wget --method=PUT --body-file='\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"''",
+        escaped_path, escaped_url, escaped_path, escaped_url
     );
-    eprintln!("⬆ Uploading from container {remote_path} to S3...");
-    ecs_exec(cluster, task, container, &cmd)?;
+    exec::non_interactive_exec(cluster, task, container, &cmd)
+        .context("failed to upload file from container")?;
 
     // 3. Download from S3 to local
     let local_dest = if std::path::Path::new(local_path).is_dir() {
@@ -181,7 +188,6 @@ async fn download(
     } else {
         local_path.to_string()
     };
-    eprintln!("⬇ Downloading to {local_dest}...");
     let resp = s3
         .get_object()
         .bucket(bucket)
@@ -195,31 +201,5 @@ async fn download(
 
     // 4. Cleanup
     s3.delete_object().bucket(bucket).key(key).send().await?;
-    eprintln!("✓ Copied {cluster}/{task}/{container}:{remote_path} → {local_dest}");
-    Ok(())
-}
-
-/// Shell out to aws CLI for ECS Exec (only interactive mode is supported)
-fn ecs_exec(cluster: &str, task: &str, container: &str, cmd: &str) -> Result<()> {
-    let status = ProcessCommand::new("aws")
-        .args([
-            "ecs",
-            "execute-command",
-            "--cluster",
-            cluster,
-            "--task",
-            task,
-            "--container",
-            container,
-            "--interactive",
-            "--command",
-            cmd,
-        ])
-        .status()
-        .context("failed to run aws ecs execute-command")?;
-
-    if !status.success() {
-        anyhow::bail!("ecs exec failed with status {}", status);
-    }
     Ok(())
 }
