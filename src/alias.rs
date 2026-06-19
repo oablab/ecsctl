@@ -632,3 +632,20 @@ async fn find_newest_task_with_container(
 
     Ok((task_id.to_string(), container_name))
 }
+
+/// Resolve alias in a remote path string like "alias:/path" → "cluster/task/container:/path".
+/// If the string doesn't contain ':', or the prefix is already a full path (contains '/'),
+/// returns the original string unchanged.
+pub async fn resolve_remote(config: &aws_config::SdkConfig, s: &str) -> anyhow::Result<String> {
+    if let Some(colon_pos) = s.find(':') {
+        let prefix = &s[..colon_pos];
+        let path = &s[colon_pos..]; // includes the ':'
+        if !prefix.contains('/') {
+            let resolved = resolve(config, prefix).await?;
+            if resolved != prefix {
+                return Ok(format!("{resolved}{path}"));
+            }
+        }
+    }
+    Ok(s.to_string())
+}
