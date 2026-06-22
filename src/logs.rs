@@ -3,6 +3,7 @@ use aws_sdk_cloudwatchlogs::Client as LogsClient;
 use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
+use crate::container::find_main_container;
 
 pub async fn run(
     config: &aws_config::SdkConfig,
@@ -85,15 +86,7 @@ pub async fn run(
         .task_definition
         .context("no task definition")?;
 
-    let cd = td
-        .container_definitions()
-        .iter()
-        .find(|cd| {
-            !cd.name()
-                .unwrap_or_default()
-                .starts_with("ecs-service-connect-")
-        })
-        .context("no app container found")?;
+    let cd = find_main_container(td.container_definitions()).context("no app container found")?;
 
     let log_config = cd.log_configuration().context("no log configuration")?;
     let opts = log_config.options().context("no log options")?;
