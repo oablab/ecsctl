@@ -2,6 +2,7 @@ pub mod alias;
 pub mod apply;
 pub mod clone;
 pub mod config;
+pub mod container;
 pub mod cp;
 pub mod delete;
 pub mod exec;
