@@ -536,7 +536,7 @@ pub async fn list_all(config: &aws_config::SdkConfig, watch: bool) -> Result<()>
     aliases.sort_by_key(|(name, _)| name.to_lowercase());
 
     if !watch {
-        let rows = fetch_all_rows(&ecs, &aliases).await;
+        let rows = fetch_all_rows(&ecs, &aliases).await?;
         print_table(&rows);
         return Ok(());
     }
@@ -544,7 +544,7 @@ pub async fn list_all(config: &aws_config::SdkConfig, watch: bool) -> Result<()>
     // Watch mode: clear screen, print, sleep, repeat
     let mut prev_rows: Vec<ServiceRow> = Vec::new();
     loop {
-        let rows = fetch_all_rows(&ecs, &aliases).await;
+        let rows = fetch_all_rows(&ecs, &aliases).await?;
         if rows != prev_rows {
             // Move cursor to top and clear screen
             print!("\x1b[H\x1b[J");
@@ -613,7 +613,7 @@ fn print_table(rows: &[ServiceRow]) {
     }
 }
 
-async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<ServiceRow> {
+async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Result<Vec<ServiceRow>> {
     let mut rows = Vec::new();
     for (name, target) in aliases {
         let parts: Vec<&str> = target.splitn(4, '/').collect();
@@ -657,7 +657,16 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
                     continue;
                 }
             },
-            Err(_) => {
+            Err(err) => {
+                // Fatal errors (network/auth) should abort immediately
+                let err_msg = format!("{:?}", err);
+                if err_msg.contains("ExpiredToken")
+                    || err_msg.contains("InvalidSignature")
+                    || err_msg.contains("DispatchFailure")
+                    || err_msg.contains("UnrecognizedClientException")
+                {
+                    return Err(anyhow::anyhow!("Fatal AWS error: {}", err));
+                }
                 rows.push(ServiceRow {
                     name: name.to_string(),
                     status: "ERROR".into(),
@@ -677,24 +686,33 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
 
         // Determine status from service state
         let num_deployments = svc.deployments().len();
-        let primary = svc.deployments().first();
+        let primary = svc
+            .deployments()
+            .iter()
+            .find(|d| d.status().unwrap_or_default() == "PRIMARY")
+            .or_else(|| svc.deployments().first());
 
         let status = if desired == 0 {
             "STOPPED".to_string()
         } else if running == desired && pending == 0 && num_deployments <= 1 {
             "RUNNING".to_string()
         } else if num_deployments > 1 {
-            let p = primary.unwrap();
-            let p_running = p.running_count() as usize;
-            let p_desired = p.desired_count() as usize;
-            if p_running < p_desired {
-                format!("REPLACING({}→{})", p_running, p_desired)
+            if let Some(p) = primary {
+                let p_running = p.running_count() as usize;
+                let p_desired = p.desired_count() as usize;
+                if p_running < p_desired {
+                    format!("REPLACING({}→{})", p_running, p_desired)
+                } else {
+                    let old_running: usize = svc
+                        .deployments()
+                        .iter()
+                        .filter(|d| d.status().unwrap_or_default() != "PRIMARY")
+                        .map(|d| d.running_count() as usize)
+                        .sum();
+                    format!("DRAINING({}+{})", p_running, old_running)
+                }
             } else {
-                let old_running: usize = svc.deployments()[1..]
-                    .iter()
-                    .map(|d| d.running_count() as usize)
-                    .sum();
-                format!("DRAINING({}+{})", p_running, old_running)
+                svc.status().unwrap_or("UNKNOWN").to_string()
             }
         } else if pending > 0 {
             format!("PENDING({})", pending)
@@ -704,10 +722,8 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
             svc.status().unwrap_or("UNKNOWN").to_string()
         };
 
-        // Get task details for cpu/mem/image from task definition
-        let task_def_arn = svc
-            .deployments()
-            .first()
+        // Get task details for cpu/mem/image from primary deployment's task definition
+        let task_def_arn = primary
             .and_then(|d| d.task_definition())
             .unwrap_or("-");
 
@@ -735,9 +751,7 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
                             .to_string()
                     })
                     .unwrap_or_else(|| "-".to_string());
-                let cap = svc
-                    .deployments()
-                    .first()
+                let cap = primary
                     .and_then(|d| d.capacity_provider_strategy().first())
                     .map(|s| s.capacity_provider().to_string())
                     .unwrap_or_else(|| "-".to_string());
@@ -766,7 +780,7 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
             tasks: running,
         });
     }
-    rows
+    Ok(rows)
 }
 
 /// Resolve an alias to "cluster/task_id/container" (ready for exec/cp/sync).

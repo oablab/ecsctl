@@ -123,6 +123,7 @@ enum Command {
     /// Describe the resolved task for an alias
     Get {
         /// Alias name
+        #[arg(conflicts_with = "all")]
         name: Option<String>,
         /// Output format: json, jsonpath='<template>'
         #[arg(short = 'o', long = "output")]
