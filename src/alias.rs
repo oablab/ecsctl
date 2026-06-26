@@ -576,8 +576,14 @@ struct ServiceRow {
 fn colorize_status(status: &str) -> String {
     let color = if status == "RUNNING" {
         "\x1b[32m" // green
-    } else if status.starts_with("PENDING") || status == "ACTIVATING" || status == "PROVISIONING" {
+    } else if status.starts_with("PENDING")
+        || status.starts_with("REPLACING")
+        || status == "ACTIVATING"
+        || status == "PROVISIONING"
+    {
         "\x1b[33m" // yellow
+    } else if status.starts_with("DRAINING") {
+        "\x1b[36m" // cyan
     } else if status == "STOPPED"
         || status.starts_with("PARTIAL")
         || status.starts_with("STOPPING")
@@ -670,10 +676,26 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
         let pending = svc.pending_count() as usize;
 
         // Determine status from service state
+        let num_deployments = svc.deployments().len();
+        let primary = svc.deployments().first();
+
         let status = if desired == 0 {
             "STOPPED".to_string()
-        } else if running == desired && pending == 0 {
+        } else if running == desired && pending == 0 && num_deployments <= 1 {
             "RUNNING".to_string()
+        } else if num_deployments > 1 {
+            let p = primary.unwrap();
+            let p_running = p.running_count() as usize;
+            let p_desired = p.desired_count() as usize;
+            if p_running < p_desired {
+                format!("REPLACING({}→{})", p_running, p_desired)
+            } else {
+                let old_running: usize = svc.deployments()[1..]
+                    .iter()
+                    .map(|d| d.running_count() as usize)
+                    .sum();
+                format!("DRAINING({}+{})", p_running, old_running)
+            }
         } else if pending > 0 {
             format!("PENDING({})", pending)
         } else if running < desired {
