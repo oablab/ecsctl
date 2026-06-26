@@ -123,10 +123,16 @@ enum Command {
     /// Describe the resolved task for an alias
     Get {
         /// Alias name
-        name: String,
+        name: Option<String>,
         /// Output format: json, jsonpath='<template>'
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
+        /// List all aliased services in a table
+        #[arg(short = 'A', long = "all")]
+        all: bool,
+        /// Watch mode: refresh every 5s (use with --all)
+        #[arg(short = 'w', long = "watch")]
+        watch: bool,
     },
     /// Show recent logs for an alias
     Log {
@@ -207,9 +213,14 @@ async fn main() -> anyhow::Result<()> {
             AliasAction::Rm { name } => alias::remove(&name).await,
             AliasAction::Ls => alias::list().await,
         },
-        Command::Get { name, output } => {
+        Command::Get { name, output, all, watch } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            alias::describe(&aws_config, &name, output.as_deref()).await
+            if all {
+                alias::list_all(&aws_config, watch).await
+            } else {
+                let name = name.ok_or_else(|| anyhow::anyhow!("alias name required (or use --all)"))?;
+                alias::describe(&aws_config, &name, output.as_deref()).await
+            }
         }
         Command::Log {
             name,
