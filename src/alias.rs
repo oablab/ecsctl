@@ -523,6 +523,267 @@ fn split_path_segments(path: &str) -> Vec<PathSegment<'_>> {
     segments
 }
 
+/// List all aliased services in a table with status info.
+pub async fn list_all(config: &aws_config::SdkConfig, watch: bool) -> Result<()> {
+    let cfg = Config::load()?;
+    if cfg.aliases.is_empty() {
+        eprintln!("No aliases configured.");
+        return Ok(());
+    }
+
+    let ecs = EcsClient::new(config);
+    let mut aliases: Vec<_> = cfg.aliases.iter().collect();
+    aliases.sort_by_key(|(name, _)| name.to_lowercase());
+
+    if !watch {
+        let rows = fetch_all_rows(&ecs, &aliases).await?;
+        print_table(&rows);
+        return Ok(());
+    }
+
+    // Watch mode: clear screen, print, sleep, repeat
+    let mut prev_rows: Vec<ServiceRow> = Vec::new();
+    loop {
+        let rows = fetch_all_rows(&ecs, &aliases).await?;
+        if rows != prev_rows {
+            // Move cursor to top and clear screen
+            print!("\x1b[H\x1b[J");
+            print_table(&rows);
+            eprintln!("\nRefreshing every 5s... (Ctrl+C to stop)");
+            prev_rows = rows;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nStopped.");
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ServiceRow {
+    name: String,
+    status: String,
+    cpu: String,
+    memory: String,
+    capacity: String,
+    image: String,
+    tasks: usize,
+}
+
+fn colorize_status(status: &str) -> String {
+    let color = if status == "RUNNING" {
+        "\x1b[32m" // green
+    } else if status.starts_with("PENDING")
+        || status.starts_with("REPLACING")
+        || status == "ACTIVATING"
+        || status == "PROVISIONING"
+    {
+        "\x1b[33m" // yellow
+    } else if status.starts_with("DRAINING") {
+        "\x1b[36m" // cyan
+    } else if status == "STOPPED"
+        || status.starts_with("PARTIAL")
+        || status.starts_with("STOPPING")
+        || status == "ERROR"
+        || status == "INVALID"
+        || status == "NOT FOUND"
+    {
+        "\x1b[31m" // red
+    } else {
+        "\x1b[0m"
+    };
+    format!("{}{:<12}\x1b[0m", color, status)
+}
+
+fn print_table(rows: &[ServiceRow]) {
+    println!(
+        "{:<15} {:<12} {:<6} {:<6} {:<15} {:<30} {:<5}",
+        "NAME", "STATUS", "CPU", "MEM", "CAPACITY", "IMAGE", "TASKS"
+    );
+    for r in rows {
+        print!("{:<15} ", r.name);
+        print!("{} ", colorize_status(&r.status));
+        println!(
+            "{:<6} {:<6} {:<15} {:<30} {}",
+            r.cpu, r.memory, r.capacity, r.image, r.tasks
+        );
+    }
+}
+
+async fn fetch_all_rows(
+    ecs: &EcsClient,
+    aliases: &[(&String, &String)],
+) -> Result<Vec<ServiceRow>> {
+    let mut rows = Vec::new();
+    for (name, target) in aliases {
+        let parts: Vec<&str> = target.splitn(4, '/').collect();
+        let (cluster, service) = match parts.len() {
+            2..=4 => (parts[0], parts[1]),
+            _ => {
+                rows.push(ServiceRow {
+                    name: name.to_string(),
+                    status: "INVALID".into(),
+                    cpu: "-".into(),
+                    memory: "-".into(),
+                    capacity: "-".into(),
+                    image: "-".into(),
+                    tasks: 0,
+                });
+                continue;
+            }
+        };
+
+        // Use describe_services for accurate status
+        let svc_resp = ecs
+            .describe_services()
+            .cluster(cluster)
+            .services(service)
+            .send()
+            .await;
+
+        let svc = match svc_resp {
+            Ok(r) => match r.services().first() {
+                Some(s) => s.clone(),
+                None => {
+                    rows.push(ServiceRow {
+                        name: name.to_string(),
+                        status: "NOT FOUND".into(),
+                        cpu: "-".into(),
+                        memory: "-".into(),
+                        capacity: "-".into(),
+                        image: "-".into(),
+                        tasks: 0,
+                    });
+                    continue;
+                }
+            },
+            Err(err) => {
+                // Fatal errors (network/auth) should abort immediately
+                let err_msg = format!("{:?}", err);
+                if err_msg.contains("ExpiredToken")
+                    || err_msg.contains("InvalidSignature")
+                    || err_msg.contains("DispatchFailure")
+                    || err_msg.contains("UnrecognizedClientException")
+                {
+                    return Err(anyhow::anyhow!("Fatal AWS error: {}", err));
+                }
+                rows.push(ServiceRow {
+                    name: name.to_string(),
+                    status: "ERROR".into(),
+                    cpu: "-".into(),
+                    memory: "-".into(),
+                    capacity: "-".into(),
+                    image: "-".into(),
+                    tasks: 0,
+                });
+                continue;
+            }
+        };
+
+        let running = svc.running_count() as usize;
+        let desired = svc.desired_count() as usize;
+        let pending = svc.pending_count() as usize;
+
+        // Determine status from service state
+        let num_deployments = svc.deployments().len();
+        let primary = svc
+            .deployments()
+            .iter()
+            .find(|d| d.status().unwrap_or_default() == "PRIMARY")
+            .or_else(|| svc.deployments().first());
+
+        let status = if desired == 0 {
+            "STOPPED".to_string()
+        } else if running == desired && pending == 0 && num_deployments <= 1 {
+            "RUNNING".to_string()
+        } else if num_deployments > 1 {
+            if let Some(p) = primary {
+                let p_running = p.running_count() as usize;
+                let p_desired = p.desired_count() as usize;
+                if p_running < p_desired {
+                    format!("REPLACING({}→{})", p_running, p_desired)
+                } else {
+                    let old_running: usize = svc
+                        .deployments()
+                        .iter()
+                        .filter(|d| d.status().unwrap_or_default() != "PRIMARY")
+                        .map(|d| d.running_count() as usize)
+                        .sum();
+                    format!("DRAINING({}+{})", p_running, old_running)
+                }
+            } else {
+                svc.status().unwrap_or("UNKNOWN").to_string()
+            }
+        } else if pending > 0 {
+            format!("PENDING({})", pending)
+        } else if running < desired {
+            format!("PARTIAL({}/{})", running, desired)
+        } else {
+            svc.status().unwrap_or("UNKNOWN").to_string()
+        };
+
+        // Get task details for cpu/mem/image from primary deployment's task definition
+        let task_def_arn = primary.and_then(|d| d.task_definition()).unwrap_or("-");
+
+        let (cpu, memory, image, capacity) = if task_def_arn != "-" {
+            if let Ok(td_resp) = ecs
+                .describe_task_definition()
+                .task_definition(task_def_arn)
+                .send()
+                .await
+            {
+                let td = td_resp.task_definition();
+                let cpu = td.and_then(|t| t.cpu()).unwrap_or("-").to_string();
+                let mem = td.and_then(|t| t.memory()).unwrap_or("-").to_string();
+                let img = td
+                    .map(|t| {
+                        t.container_definitions()
+                            .iter()
+                            .find(|c| {
+                                !c.name()
+                                    .unwrap_or_default()
+                                    .starts_with("ecs-service-connect-")
+                            })
+                            .and_then(|c| c.image())
+                            .unwrap_or("-")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "-".to_string());
+                let cap = primary
+                    .and_then(|d| d.capacity_provider_strategy().first())
+                    .map(|s| s.capacity_provider().to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                (cpu, mem, img, cap)
+            } else {
+                ("-".into(), "-".into(), "-".into(), "-".into())
+            }
+        } else {
+            ("-".into(), "-".into(), "-".into(), "-".into())
+        };
+
+        let image_short = image.rsplit('/').next().unwrap_or(&image);
+        let image_display: String = if image_short.chars().count() > 30 {
+            image_short.chars().take(30).collect()
+        } else {
+            image_short.to_string()
+        };
+
+        rows.push(ServiceRow {
+            name: name.to_string(),
+            status,
+            cpu,
+            memory,
+            capacity,
+            image: image_display,
+            tasks: running,
+        });
+    }
+    Ok(rows)
+}
+
 /// Resolve an alias to "cluster/task_id/container" (ready for exec/cp/sync).
 /// Alias format: cluster/service[/container[/task_id]]
 /// - 2 parts (cluster/service): auto-resolve container + newest task
