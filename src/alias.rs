@@ -572,7 +572,13 @@ fn colorize_status(status: &str) -> String {
         "\x1b[32m" // green
     } else if status.starts_with("PENDING") || status == "ACTIVATING" || status == "PROVISIONING" {
         "\x1b[33m" // yellow
-    } else if status == "STOPPED" || status.starts_with("PARTIAL") || status.starts_with("STOPPING") || status == "ERROR" || status == "INVALID" || status == "NOT FOUND" {
+    } else if status == "STOPPED"
+        || status.starts_with("PARTIAL")
+        || status.starts_with("STOPPING")
+        || status == "ERROR"
+        || status == "INVALID"
+        || status == "NOT FOUND"
+    {
         "\x1b[31m" // red
     } else {
         "\x1b[0m"
@@ -595,10 +601,7 @@ fn print_table(rows: &[ServiceRow]) {
     }
 }
 
-async fn fetch_all_rows(
-    ecs: &EcsClient,
-    aliases: &[(&String, &String)],
-) -> Vec<ServiceRow> {
+async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<ServiceRow> {
     let mut rows = Vec::new();
     for (name, target) in aliases {
         let parts: Vec<&str> = target.splitn(4, '/').collect();

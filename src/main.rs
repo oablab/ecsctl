@@ -213,12 +213,18 @@ async fn main() -> anyhow::Result<()> {
             AliasAction::Rm { name } => alias::remove(&name).await,
             AliasAction::Ls => alias::list().await,
         },
-        Command::Get { name, output, all, watch } => {
+        Command::Get {
+            name,
+            output,
+            all,
+            watch,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             if all {
                 alias::list_all(&aws_config, watch).await
             } else {
-                let name = name.ok_or_else(|| anyhow::anyhow!("alias name required (or use --all)"))?;
+                let name =
+                    name.ok_or_else(|| anyhow::anyhow!("alias name required (or use --all)"))?;
                 alias::describe(&aws_config, &name, output.as_deref()).await
             }
         }
