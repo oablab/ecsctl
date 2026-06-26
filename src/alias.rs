@@ -613,7 +613,10 @@ fn print_table(rows: &[ServiceRow]) {
     }
 }
 
-async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Result<Vec<ServiceRow>> {
+async fn fetch_all_rows(
+    ecs: &EcsClient,
+    aliases: &[(&String, &String)],
+) -> Result<Vec<ServiceRow>> {
     let mut rows = Vec::new();
     for (name, target) in aliases {
         let parts: Vec<&str> = target.splitn(4, '/').collect();
@@ -723,9 +726,7 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Resu
         };
 
         // Get task details for cpu/mem/image from primary deployment's task definition
-        let task_def_arn = primary
-            .and_then(|d| d.task_definition())
-            .unwrap_or("-");
+        let task_def_arn = primary.and_then(|d| d.task_definition()).unwrap_or("-");
 
         let (cpu, memory, image, capacity) = if task_def_arn != "-" {
             if let Ok(td_resp) = ecs
