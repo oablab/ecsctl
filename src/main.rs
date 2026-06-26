@@ -220,7 +220,13 @@ async fn main() -> anyhow::Result<()> {
             watch,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            if watch && !all {
+                anyhow::bail!("--watch can only be used with --all");
+            }
             if all {
+                if output.is_some() {
+                    anyhow::bail!("--output is not supported with --all");
+                }
                 alias::list_all(&aws_config, watch).await
             } else {
                 let name =

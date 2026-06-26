@@ -552,7 +552,13 @@ pub async fn list_all(config: &aws_config::SdkConfig, watch: bool) -> Result<()>
             eprintln!("\nRefreshing every 5s... (Ctrl+C to stop)");
             prev_rows = rows;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nStopped.");
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -722,10 +728,10 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
         };
 
         let image_short = image.rsplit('/').next().unwrap_or(&image);
-        let image_display = if image_short.len() > 30 {
-            &image_short[..30]
+        let image_display: String = if image_short.chars().count() > 30 {
+            image_short.chars().take(30).collect()
         } else {
-            image_short
+            image_short.to_string()
         };
 
         rows.push(ServiceRow {
@@ -734,7 +740,7 @@ async fn fetch_all_rows(ecs: &EcsClient, aliases: &[(&String, &String)]) -> Vec<
             cpu,
             memory,
             capacity,
-            image: image_display.to_string(),
+            image: image_display,
             tasks: running,
         });
     }
