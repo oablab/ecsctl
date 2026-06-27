@@ -9,11 +9,6 @@ use crate::exec;
 /// Default presigned URL expiry.
 pub const DEFAULT_PRESIGN_EXPIRY: Duration = Duration::from_secs(60);
 
-/// Escape a string for safe use inside single-quoted shell arguments.
-fn shell_escape(s: &str) -> String {
-    s.replace('\'', "'\\''")
-}
-
 /// Parse "cluster/task/container:/remote/path" into parts
 pub fn parse_remote(s: &str) -> Option<(&str, &str, &str, &str)> {
     let colon_pos = s.find(':')?;
@@ -133,11 +128,11 @@ async fn upload(
     } else {
         remote_path.to_string()
     };
-    let escaped_dest = shell_escape(&dest);
-    let escaped_url = shell_escape(url);
     let cmd = format!(
-        "sh -c 'curl -sf -o '\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"' || wget -q -O '\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"''",
-        escaped_dest, escaped_url, escaped_dest, escaped_url
+        "sh -c 'URL=\"{}\" && curl -f -o \"{}\" \"$URL\" || wget -q -O \"{}\" \"$URL\"'",
+        url.replace('\'', "'\\''"),
+        dest,
+        dest,
     );
     exec::non_interactive_exec(cluster, task, container, &cmd)
         .context("failed to download file inside container")?;
@@ -169,11 +164,11 @@ async fn download(
     let url = presigned.uri();
 
     // 2. ECS Exec: upload from container to S3 via presigned PUT
-    let escaped_path = shell_escape(remote_path);
-    let escaped_url = shell_escape(url);
     let cmd = format!(
-        "sh -c 'curl -sf -T '\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"' || wget --method=PUT --body-file='\"'\"'{}' \"'\"' '\"'\"'{}' \"'\"''",
-        escaped_path, escaped_url, escaped_path, escaped_url
+        "sh -c 'URL=\"{}\" && curl -f -T \"{}\" \"$URL\" || wget --method=PUT --body-file=\"{}\" \"$URL\"'",
+        url.replace('\'', "'\\''"),
+        remote_path,
+        remote_path,
     );
     exec::non_interactive_exec(cluster, task, container, &cmd)
         .context("failed to upload file from container")?;
