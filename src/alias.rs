@@ -758,7 +758,12 @@ async fn fetch_all_rows(
                 let cap = primary
                     .and_then(|d| d.capacity_provider_strategy().first())
                     .map(|s| s.capacity_provider().to_string())
-                    .unwrap_or_else(|| "-".to_string());
+                    .unwrap_or_else(|| {
+                        primary
+                            .and_then(|d| d.launch_type())
+                            .map(|lt| lt.as_str().to_string())
+                            .unwrap_or_else(|| "-".to_string())
+                    });
                 (cpu, mem, img, cap)
             } else {
                 ("-".into(), "-".into(), "-".into(), "-".into())
