@@ -574,6 +574,7 @@ struct ServiceRow {
 }
 
 fn colorize_status(status: &str) -> String {
+    const STATUS_WIDTH: usize = 16;
     let color = if status == "RUNNING" {
         "\x1b[32m" // green
     } else if status.starts_with("PENDING")
@@ -595,12 +596,14 @@ fn colorize_status(status: &str) -> String {
     } else {
         "\x1b[0m"
     };
-    format!("{}{:<12}\x1b[0m", color, status)
+    let display_width = status.chars().count();
+    let pad = STATUS_WIDTH.saturating_sub(display_width);
+    format!("{}{}{}\x1b[0m", color, status, " ".repeat(pad))
 }
 
 fn print_table(rows: &[ServiceRow]) {
     println!(
-        "{:<15} {:<12} {:<6} {:<6} {:<15} {:<30} {:<5}",
+        "{:<15} {:<16} {:<6} {:<6} {:<15} {:<30} {:<5}",
         "NAME", "STATUS", "CPU", "MEM", "CAPACITY", "IMAGE", "TASKS"
     );
     for r in rows {
