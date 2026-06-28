@@ -128,11 +128,12 @@ async fn upload(
     } else {
         remote_path.to_string()
     };
+    let escaped_dest = dest.replace('"', r#"\""#);
     let cmd = format!(
-        "sh -c 'URL=\"{}\" && curl -f -o \"{}\" \"$URL\" || wget -q -O \"{}\" \"$URL\"'",
+        "sh -c 'URL=\"{}\" && curl -f --no-progress-meter -o \"{}\" \"$URL\" || wget -q -O \"{}\" \"$URL\"'",
         url.replace('\'', "'\\''"),
-        dest,
-        dest,
+        escaped_dest,
+        escaped_dest,
     );
     exec::non_interactive_exec(cluster, task, container, &cmd)
         .context("failed to download file inside container")?;
@@ -164,11 +165,12 @@ async fn download(
     let url = presigned.uri();
 
     // 2. ECS Exec: upload from container to S3 via presigned PUT
+    let escaped_path = remote_path.replace('"', r#"\""#);
     let cmd = format!(
-        "sh -c 'URL=\"{}\" && curl -f -T \"{}\" \"$URL\" || wget --method=PUT --body-file=\"{}\" \"$URL\"'",
+        "sh -c 'URL=\"{}\" && curl -f --no-progress-meter -T \"{}\" \"$URL\" || wget --method=PUT --body-file=\"{}\" \"$URL\"'",
         url.replace('\'', "'\\''"),
-        remote_path,
-        remote_path,
+        escaped_path,
+        escaped_path,
     );
     exec::non_interactive_exec(cluster, task, container, &cmd)
         .context("failed to upload file from container")?;
