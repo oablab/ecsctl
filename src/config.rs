@@ -14,6 +14,9 @@ pub struct Config {
     /// Aliases: name -> "cluster/service/container[/task_id]"
     #[serde(default)]
     pub aliases: std::collections::HashMap<String, String>,
+    /// Groups: name -> list of alias names for batch operations
+    #[serde(default)]
+    pub groups: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Config {
@@ -46,5 +49,15 @@ impl Config {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(&path, content)?;
         Ok(())
+    }
+
+    /// Resolve a target that may be an @group or a single alias.
+    /// Returns a list of alias names.
+    pub fn resolve_targets(&self, target: &str) -> Vec<String> {
+        if let Some(group_name) = target.strip_prefix('@') {
+            self.groups.get(group_name).cloned().unwrap_or_default()
+        } else {
+            vec![target.to_string()]
+        }
     }
 }
