@@ -5,32 +5,44 @@ use crate::config::Config;
 
 pub async fn run(config: &aws_config::SdkConfig, name: &str, wait: bool) -> Result<()> {
     let cfg = Config::load()?;
-    let target = cfg
-        .aliases
-        .get(name)
-        .context(format!("alias '{name}' not found"))?
-        .clone();
+    let targets = cfg.resolve_targets(name);
 
-    let parts: Vec<&str> = target.splitn(4, '/').collect();
-    let (cluster, service) = match parts.len() {
-        2..=4 => (parts[0], parts[1]),
-        _ => anyhow::bail!("invalid alias target"),
-    };
+    if targets.is_empty() {
+        anyhow::bail!("group '{}' is empty or not found", name);
+    }
 
     let ecs = EcsClient::new(config);
 
-    eprintln!("🔄 Restarting {service}...");
-    ecs.update_service()
-        .cluster(cluster)
-        .service(service)
-        .force_new_deployment(true)
-        .send()
-        .await
-        .context("UpdateService (force new deployment) failed")?;
+    for alias in &targets {
+        let target = cfg
+            .aliases
+            .get(alias)
+            .context(format!("alias '{alias}' not found"))?
+            .clone();
 
-    eprintln!("✓ New deployment triggered for {cluster}/{service}");
+        let parts: Vec<&str> = target.splitn(4, '/').collect();
+        let (cluster, service) = match parts.len() {
+            2..=4 => (parts[0], parts[1]),
+            _ => anyhow::bail!("invalid alias target for '{alias}'"),
+        };
 
-    if wait {
+        eprintln!("🔄 Restarting {alias} ({service})...");
+        ecs.update_service()
+            .cluster(cluster)
+            .service(service)
+            .force_new_deployment(true)
+            .send()
+            .await
+            .context(format!("UpdateService failed for {alias}"))?;
+
+        eprintln!("✓ New deployment triggered for {alias}");
+    }
+
+    if wait && targets.len() == 1 {
+        let alias = &targets[0];
+        let target = cfg.aliases.get(alias).unwrap();
+        let parts: Vec<&str> = target.splitn(4, '/').collect();
+        let (cluster, service) = (parts[0], parts[1]);
         eprintln!("⏳ Waiting for deployment to stabilize...");
         crate::apply::wait_for_stable(&ecs, cluster, service).await?;
         eprintln!("✓ Deployment stable");

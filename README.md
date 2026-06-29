@@ -73,23 +73,27 @@ ecsctl delete -f https://example.com/service.yaml  # remote URL
 
 Scales to 0, deletes the service, removes the alias.
 
-### `ecsctl restart` — force restart a service
+### `ecsctl restart` — force restart a service or group
 
 ```bash
-ecsctl restart chaodu
+ecsctl restart chaodu          # single service
+ecsctl restart @all            # restart all services in group
+ecsctl restart chaodu --wait   # wait for stabilization
 ```
 
 Triggers a new deployment (rolling replacement of all tasks).
 
-### `ecsctl scale` — scale a service
+### `ecsctl scale` — scale a service or group
 
 ```bash
 ecsctl scale chaodu 0          # scale to 0 (no running tasks)
 ecsctl scale chaodu 1          # scale to 1 task
 ecsctl scale chaodu 3 --wait   # scale to 3 and wait for stabilization
+ecsctl scale @small 0          # scale all aliases in group "small" to 0
+ecsctl scale @all 1            # bring up entire fleet
 ```
 
-Sets the desired task count for a service. Use `--wait` to block until all tasks are running.
+Sets the desired task count for a service or all services in a `@group`. Use `--wait` to block until stable (single target only).
 
 ### `ecsctl update` — update a service in-place
 
@@ -169,6 +173,25 @@ ecsctl alias rm myapp
 ```
 
 Alias format: `cluster/service[/container[/task_id]]`. Omitted parts are auto-resolved at runtime.
+
+### Alias Groups
+
+Define named groups in `~/.ecsctl/config.toml` for batch operations:
+
+```toml
+[groups]
+all = ["chaodu", "koudu", "juedu", "kongming", "xiaoqiao"]
+small = ["kongming", "xiaoqiao", "guanyu"]
+kiro = ["chaodu", "zhangfei", "telegram"]
+```
+
+Use `@group` syntax with `restart` and `scale`:
+
+```bash
+ecsctl restart @all            # restart entire fleet
+ecsctl scale @small 0          # stop lightweight bots
+ecsctl scale @kiro 1           # start kiro-backed bots
+```
 
 ## Shell Aliases (Sugar)
 

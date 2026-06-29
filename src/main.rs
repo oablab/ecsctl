@@ -65,17 +65,17 @@ enum Command {
         #[arg(short = 'f', long = "file")]
         file: Option<String>,
     },
-    /// Force restart a service (new deployment)
+    /// Force restart a service or @group (new deployment)
     Restart {
-        /// Alias name
+        /// Alias or @group name
         name: String,
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
     },
-    /// Scale a service to a desired task count
+    /// Scale a service or @group to a desired task count
     Scale {
-        /// Alias name
+        /// Alias or @group name
         name: String,
         /// Desired task count (0 to N)
         count: i32,
