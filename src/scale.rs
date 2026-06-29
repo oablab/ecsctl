@@ -34,6 +34,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: b
             .cluster(cluster)
             .service(service)
             .desired_count(count)
+            .force_new_deployment(true)
             .send()
             .await
             .context(format!("UpdateService failed for {alias}"))?;
