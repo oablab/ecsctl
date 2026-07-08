@@ -82,6 +82,17 @@ enum Command {
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
+        /// Create a recurring schedule (EventBridge Scheduler) instead of immediate scale
+        #[arg(long)]
+        with_schedule: Option<String>,
+        /// IANA timezone for schedule expression (default: UTC)
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+    },
+    /// Manage scaling schedules
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
     },
     /// Update a service in-place (export + apply --set without intermediate file)
     Update {
@@ -163,6 +174,17 @@ enum AliasAction {
     Ls,
 }
 
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// List all scaling schedules
+    List,
+    /// Delete a schedule by name
+    Delete {
+        /// Schedule name (from 'ecsctl schedule list')
+        name: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -185,9 +207,20 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             restart::run(&aws_config, &name, wait).await
         }
-        Command::Scale { name, count, wait } => {
+        Command::Scale { name, count, wait, with_schedule, timezone } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            scale::run(&aws_config, &name, count, wait).await
+            if let Some(schedule_expr) = with_schedule {
+                scale::run_with_schedule(&aws_config, &name, count, &schedule_expr, &timezone).await
+            } else {
+                scale::run(&aws_config, &name, count, wait).await
+            }
+        }
+        Command::Schedule { action } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            match action {
+                ScheduleAction::List => scale::list_schedules(&aws_config).await,
+                ScheduleAction::Delete { name } => scale::delete_schedule(&aws_config, &name).await,
+            }
         }
         Command::Update {
             name,
