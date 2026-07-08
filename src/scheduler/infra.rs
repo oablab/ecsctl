@@ -148,35 +148,40 @@ fn is_retryable_iam_error(code: &str, message: &str) -> bool {
         && (message.contains("unable to assume") || message.contains("cannot be assumed"))
 }
 
+/// Parameters for creating or updating a schedule.
+pub struct ScheduleParams<'a> {
+    pub schedule_name: &'a str,
+    pub group_name: &'a str,
+    pub schedule_expression: &'a str,
+    pub timezone: &'a str,
+    pub ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
+    pub target: aws_sdk_scheduler::types::Target,
+    pub is_update: bool,
+}
+
 /// Create or update a schedule with retry + exponential backoff to handle IAM propagation delay.
 ///
 /// Both create and update can fail if the IAM role hasn't propagated yet,
 /// so we use a unified retry for both operations.
 pub async fn create_or_update_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
-    schedule_name: &str,
-    group_name: &str,
-    schedule_expression: &str,
-    timezone: &str,
-    ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
-    target: aws_sdk_scheduler::types::Target,
-    is_update: bool,
+    params: ScheduleParams<'_>,
 ) -> Result<()> {
     let max_attempts = 4;
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let ftw_clone = ftw.clone();
-        let target_clone = target.clone();
+        let ftw_clone = params.ftw.clone();
+        let target_clone = params.target.clone();
 
         // Execute the appropriate operation and extract retryability info
-        let (success, is_retryable, err_context) = if is_update {
+        let (success, is_retryable, err_context) = if params.is_update {
             match scheduler
                 .update_schedule()
-                .name(schedule_name)
-                .group_name(group_name)
-                .schedule_expression(schedule_expression)
-                .schedule_expression_timezone(timezone)
+                .name(params.schedule_name)
+                .group_name(params.group_name)
+                .schedule_expression(params.schedule_expression)
+                .schedule_expression_timezone(params.timezone)
                 .flexible_time_window(ftw_clone)
                 .target(target_clone)
                 .send()
@@ -199,10 +204,10 @@ pub async fn create_or_update_schedule_with_retry(
         } else {
             match scheduler
                 .create_schedule()
-                .name(schedule_name)
-                .group_name(group_name)
-                .schedule_expression(schedule_expression)
-                .schedule_expression_timezone(timezone)
+                .name(params.schedule_name)
+                .group_name(params.group_name)
+                .schedule_expression(params.schedule_expression)
+                .schedule_expression_timezone(params.timezone)
                 .flexible_time_window(ftw_clone)
                 .target(target_clone)
                 .send()
@@ -238,9 +243,10 @@ pub async fn create_or_update_schedule_with_retry(
             );
             tokio::time::sleep(delay).await;
         } else {
-            let op = if is_update { "update" } else { "create" };
+            let op = if params.is_update { "update" } else { "create" };
             anyhow::bail!(
-                "failed to {op} schedule '{schedule_name}': {}",
+                "failed to {op} schedule '{}': {}",
+                params.schedule_name,
                 err_context.unwrap_or_else(|| "unknown error".to_string())
             );
         }

@@ -4,7 +4,7 @@ use crate::config::Config;
 
 use super::infra::{
     create_or_update_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name,
-    schedule_exists, validate_schedule_expression,
+    schedule_exists, validate_schedule_expression, ScheduleParams,
 };
 
 /// Create EventBridge Scheduler schedules for a service or @group.
@@ -59,13 +59,15 @@ pub async fn create_schedule(
 
         create_or_update_schedule_with_retry(
             &scheduler,
-            &schedule_name,
-            group_name,
-            schedule_expression,
-            timezone,
-            ftw,
-            target,
-            exists,
+            ScheduleParams {
+                schedule_name: &schedule_name,
+                group_name,
+                schedule_expression,
+                timezone,
+                ftw,
+                target,
+                is_update: exists,
+            },
         )
         .await?;
 
