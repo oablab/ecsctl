@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use aws_sdk_scheduler::error::ProvideErrorMetadata;
 
 /// Validate that a role ARN has the correct format for an IAM role.
 ///
