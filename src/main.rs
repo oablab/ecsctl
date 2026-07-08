@@ -207,7 +207,13 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             restart::run(&aws_config, &name, wait).await
         }
-        Command::Scale { name, count, wait, with_schedule, timezone } => {
+        Command::Scale {
+            name,
+            count,
+            wait,
+            with_schedule,
+            timezone,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             if let Some(schedule_expr) = with_schedule {
                 scale::run_with_schedule(&aws_config, &name, count, &schedule_expr, &timezone).await

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use aws_sdk_ecs::Client as EcsClient;
-use aws_sdk_scheduler::error::ProvideErrorMetadata;
 
 use crate::config::Config;
 
@@ -43,17 +42,17 @@ pub async fn scale_service(
     count: i32,
     force: bool,
 ) -> Result<()> {
-    let mut req = ecs.update_service()
+    let mut req = ecs
+        .update_service()
         .cluster(cluster)
         .service(service)
         .desired_count(count);
     if force {
         req = req.force_new_deployment(true);
     }
-    req.send().await.context(format!(
-        "UpdateService failed for {}/{}",
-        cluster, service
-    ))?;
+    req.send()
+        .await
+        .context(format!("UpdateService failed for {}/{}", cluster, service))?;
     Ok(())
 }
 
@@ -106,10 +105,15 @@ pub async fn run_with_schedule(
     let sts = aws_sdk_sts::Client::new(aws_config);
     let iam = aws_sdk_iam::Client::new(aws_config);
 
-    let identity = sts.get_caller_identity().send().await
+    let identity = sts
+        .get_caller_identity()
+        .send()
+        .await
         .context("failed to get caller identity")?;
     let account_id = identity.account().unwrap_or("unknown");
-    let region = aws_config.region().map(|r| r.to_string())
+    let region = aws_config
+        .region()
+        .map(|r| r.to_string())
         .unwrap_or_else(|| "us-east-1".to_string());
 
     let group_name = "ecsctl-schedules";
@@ -117,7 +121,9 @@ pub async fn run_with_schedule(
     let role_arn = ensure_scheduler_role(&iam, account_id, &region).await?;
 
     for alias in &targets {
-        let target = cfg.aliases.get(alias)
+        let target = cfg
+            .aliases
+            .get(alias)
             .context(format!("alias '{alias}' not found"))?;
         let parts: Vec<&str> = target.splitn(4, '/').collect();
         let (cluster, service) = match parts.len() {
@@ -158,25 +164,29 @@ pub async fn run_with_schedule(
         let exists = schedule_exists(&scheduler, &schedule_name, group_name).await?;
 
         if exists {
-            scheduler.update_schedule()
+            scheduler
+                .update_schedule()
                 .name(&schedule_name)
                 .group_name(group_name)
                 .schedule_expression(schedule_expression)
                 .schedule_expression_timezone(timezone)
                 .flexible_time_window(ftw)
                 .target(target)
-                .send().await
+                .send()
+                .await
                 .context("failed to update schedule")?;
             eprintln!("✓ Updated: {schedule_name}");
         } else {
-            scheduler.create_schedule()
+            scheduler
+                .create_schedule()
                 .name(&schedule_name)
                 .group_name(group_name)
                 .schedule_expression(schedule_expression)
                 .schedule_expression_timezone(timezone)
                 .flexible_time_window(ftw)
                 .target(target)
-                .send().await
+                .send()
+                .await
                 .context("failed to create schedule")?;
             eprintln!("✓ Created: {schedule_name}");
         }
@@ -205,7 +215,9 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
             Ok(output) => {
                 all.extend(output.schedules().to_vec());
                 next_token = output.next_token().map(|s| s.to_string());
-                if next_token.is_none() { break; }
+                if next_token.is_none() {
+                    break;
+                }
             }
             Err(e) => {
                 if e.as_service_error()
@@ -225,16 +237,23 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<45} {:<30} {:<18} {}", "NAME", "SCHEDULE", "TIMEZONE", "STATE");
+    println!("{:<45} {:<30} {:<18} STATE", "NAME", "SCHEDULE", "TIMEZONE");
     for s in &all {
         let name = s.name().unwrap_or("-");
         let state = s.state().map(|st| st.as_str()).unwrap_or("?");
-        let (expr, tz) = match scheduler.get_schedule()
-            .name(name).group_name(group_name).send().await
+        let (expr, tz) = match scheduler
+            .get_schedule()
+            .name(name)
+            .group_name(group_name)
+            .send()
+            .await
         {
             Ok(detail) => (
                 detail.schedule_expression().unwrap_or("-").to_string(),
-                detail.schedule_expression_timezone().unwrap_or("UTC").to_string(),
+                detail
+                    .schedule_expression_timezone()
+                    .unwrap_or("UTC")
+                    .to_string(),
             ),
             Err(_) => ("-".to_string(), "-".to_string()),
         };
@@ -248,7 +267,13 @@ pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> 
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
     let group_name = "ecsctl-schedules";
 
-    match scheduler.delete_schedule().name(name).group_name(group_name).send().await {
+    match scheduler
+        .delete_schedule()
+        .name(name)
+        .group_name(group_name)
+        .send()
+        .await
+    {
         Ok(_) => eprintln!("✓ Deleted: {name}"),
         Err(e) => {
             if e.as_service_error()
@@ -296,7 +321,13 @@ async fn schedule_exists(
     name: &str,
     group_name: &str,
 ) -> Result<bool> {
-    match scheduler.get_schedule().name(name).group_name(group_name).send().await {
+    match scheduler
+        .get_schedule()
+        .name(name)
+        .group_name(group_name)
+        .send()
+        .await
+    {
         Ok(_) => Ok(true),
         Err(e) => {
             if e.as_service_error()
@@ -315,10 +346,21 @@ async fn ensure_schedule_group(
     scheduler: &aws_sdk_scheduler::Client,
     group_name: &str,
 ) -> Result<()> {
-    if scheduler.get_schedule_group().name(group_name).send().await.is_err() {
-        let result = scheduler.create_schedule_group().name(group_name).send().await;
+    if scheduler
+        .get_schedule_group()
+        .name(group_name)
+        .send()
+        .await
+        .is_err()
+    {
+        let result = scheduler
+            .create_schedule_group()
+            .name(group_name)
+            .send()
+            .await;
         if let Err(e) = result {
-            if !e.as_service_error()
+            if !e
+                .as_service_error()
                 .map(|se| se.is_conflict_exception())
                 .unwrap_or(false)
             {
@@ -337,9 +379,8 @@ async fn ensure_scheduler_role(
     let role_name = "ecsctl-scheduler-role";
     let role_arn = format!("arn:aws:iam::{account_id}:role/{role_name}");
 
-    match iam.get_role().role_name(role_name).send().await {
-        Ok(_) => return Ok(role_arn),
-        Err(_) => {}
+    if iam.get_role().role_name(role_name).send().await.is_ok() {
+        return Ok(role_arn);
     }
 
     let trust_policy = serde_json::json!({
@@ -361,7 +402,8 @@ async fn ensure_scheduler_role(
         .role_name(role_name)
         .assume_role_policy_document(trust_policy.to_string())
         .description("EventBridge Scheduler role for ecsctl scale commands")
-        .send().await
+        .send()
+        .await
         .context("failed to create scheduler role")?;
 
     let policy = serde_json::json!({
@@ -377,7 +419,8 @@ async fn ensure_scheduler_role(
         .role_name(role_name)
         .policy_name("ecs-scale")
         .policy_document(policy.to_string())
-        .send().await
+        .send()
+        .await
         .context("failed to attach policy to scheduler role")?;
 
     // Wait for IAM propagation
