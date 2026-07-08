@@ -161,6 +161,7 @@ pub async fn schedule_exists(
 }
 
 /// Create a schedule with retry + exponential backoff to handle IAM propagation delay.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
     schedule_name: &str,

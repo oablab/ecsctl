@@ -179,7 +179,7 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
                 let target_info = detail
                     .target()
                     .and_then(|t| t.input())
-                    .and_then(|input| parse_target_display(input))
+                    .and_then(parse_target_display)
                     .unwrap_or_else(|| "-".to_string());
                 (expr, tz, target_info)
             }
