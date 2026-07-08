@@ -11,5 +11,6 @@ pub mod loader;
 pub mod logs;
 pub mod restart;
 pub mod scale;
+pub mod scheduler;
 pub mod sync;
 pub mod update;

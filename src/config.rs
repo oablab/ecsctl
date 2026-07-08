@@ -17,6 +17,18 @@ pub struct Config {
     /// Groups: name -> list of alias names for batch operations
     #[serde(default)]
     pub groups: std::collections::HashMap<String, Vec<String>>,
+    /// Scheduler configuration
+    #[serde(default)]
+    pub scheduler: Option<SchedulerConfig>,
+}
+
+/// [scheduler] section in config.toml
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    /// IAM role ARN for EventBridge Scheduler execution
+    pub role_arn: Option<String>,
+    /// Schedule group name (default: "ecsctl-schedules")
+    pub group_name: Option<String>,
 }
 
 impl Config {
@@ -59,5 +71,10 @@ impl Config {
         } else {
             vec![target.to_string()]
         }
+    }
+
+    /// Get the scheduler execution role ARN from config, if set.
+    pub fn scheduler_role_arn(&self) -> Option<&str> {
+        self.scheduler.as_ref().and_then(|s| s.role_arn.as_deref())
     }
 }

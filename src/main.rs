@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use ecsctl::config::Config;
-use ecsctl::{alias, apply, clone, cp, delete, exec, export, logs, restart, scale, sync, update};
+use ecsctl::{
+    alias, apply, clone, cp, delete, exec, export, logs, restart, scale, scheduler, sync, update,
+};
 
 #[derive(Parser)]
 #[command(
@@ -73,23 +75,17 @@ enum Command {
         #[arg(long)]
         wait: bool,
     },
-    /// Scale a service or @group to a desired task count
+    /// Scale a service or @group to a desired task count (immediate)
     Scale {
         /// Alias or @group name
         name: String,
         /// Desired task count (0 to N)
         count: i32,
         /// Wait for deployment to stabilize
-        #[arg(long, conflicts_with = "with_schedule")]
-        wait: bool,
-        /// Create a recurring schedule (EventBridge Scheduler) instead of immediate scale
         #[arg(long)]
-        with_schedule: Option<String>,
-        /// IANA timezone for schedule expression (default: UTC)
-        #[arg(long, default_value = "UTC", requires = "with_schedule")]
-        timezone: String,
+        wait: bool,
     },
-    /// Manage scaling schedules
+    /// Manage scaling schedules (EventBridge Scheduler)
     Schedule {
         #[command(subcommand)]
         action: ScheduleAction,
@@ -176,6 +172,22 @@ enum AliasAction {
 
 #[derive(Subcommand)]
 enum ScheduleAction {
+    /// Create a recurring schedule for scaling a service or @group
+    Create {
+        /// Alias or @group name
+        name: String,
+        /// Desired task count
+        count: i32,
+        /// Schedule expression: cron(...), rate(...), or at(...)
+        #[arg(long)]
+        expr: String,
+        /// IANA timezone for schedule expression (default: UTC)
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+        /// IAM role ARN for EventBridge Scheduler execution (overrides config.toml)
+        #[arg(long)]
+        role_arn: Option<String>,
+    },
     /// List all scaling schedules
     List,
     /// Delete a schedule by name
@@ -207,25 +219,44 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             restart::run(&aws_config, &name, wait).await
         }
-        Command::Scale {
-            name,
-            count,
-            wait,
-            with_schedule,
-            timezone,
-        } => {
+        Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            if let Some(schedule_expr) = with_schedule {
-                scale::run_with_schedule(&aws_config, &name, count, &schedule_expr, &timezone).await
-            } else {
-                scale::run(&aws_config, &name, count, wait).await
-            }
+            scale::run(&aws_config, &name, count, wait).await
         }
         Command::Schedule { action } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             match action {
-                ScheduleAction::List => scale::list_schedules(&aws_config).await,
-                ScheduleAction::Delete { name } => scale::delete_schedule(&aws_config, &name).await,
+                ScheduleAction::Create {
+                    name,
+                    count,
+                    expr,
+                    timezone,
+                    role_arn,
+                } => {
+                    // Resolve role ARN: --role-arn flag > config.toml > error
+                    let resolved_role_arn = role_arn
+                        .or_else(|| cfg.scheduler_role_arn().map(|s| s.to_string()))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "scheduler role ARN required.\n\
+                                 Provide --role-arn or set [scheduler].role_arn in ~/.ecsctl/config.toml\n\n\
+                                 Example config:\n  [scheduler]\n  role_arn = \"arn:aws:iam::123456789012:role/ecsctl-scheduler-role\""
+                            )
+                        })?;
+                    scheduler::create_schedule(
+                        &aws_config,
+                        &name,
+                        count,
+                        &expr,
+                        &timezone,
+                        &resolved_role_arn,
+                    )
+                    .await
+                }
+                ScheduleAction::List => scheduler::list_schedules(&aws_config).await,
+                ScheduleAction::Delete { name } => {
+                    scheduler::delete_schedule(&aws_config, &name).await
+                }
             }
         }
         Command::Update {
