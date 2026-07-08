@@ -5,7 +5,7 @@ use crate::config::Config;
 
 use super::infra::{
     create_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name, schedule_exists,
-    update_schedule_with_retry, validate_role_arn, validate_schedule_expression,
+    update_schedule_with_retry, validate_role_arn, validate_schedule_expression, ScheduleParams,
 };
 
 /// Create EventBridge Scheduler schedules for a service or @group.
@@ -13,11 +13,13 @@ use super::infra::{
 /// Requires a user-provided `role_arn` — does NOT auto-create IAM roles.
 pub async fn create_schedule(
     aws_config: &aws_config::SdkConfig,
+    cfg: &Config,
     name: &str,
     count: i32,
     schedule_expression: &str,
     timezone: &str,
     role_arn: &str,
+    explicit_name: Option<&str>,
 ) -> Result<()> {
     if count < 0 {
         anyhow::bail!("count must be >= 0, got {count}");
@@ -25,7 +27,6 @@ pub async fn create_schedule(
     validate_schedule_expression(schedule_expression)?;
     validate_role_arn(role_arn)?;
 
-    let cfg = Config::load()?;
     let targets = cfg.resolve_targets(name);
     let group_name = cfg.scheduler_group_name().to_string();
 
@@ -39,7 +40,11 @@ pub async fn create_schedule(
     for alias in &targets {
         let (cluster, service) = cfg.resolve_alias(alias)?;
 
-        let schedule_name = sanitize_schedule_name(alias, count);
+        let schedule_name = match explicit_name {
+            Some(n) if targets.len() == 1 => n.to_string(),
+            Some(n) => format!("{}-{}", n, alias),
+            None => sanitize_schedule_name(alias, count),
+        };
         let description = format!(
             "ecsctl: scale {} ({}/{}) to {}",
             alias, cluster, service, count
@@ -63,31 +68,21 @@ pub async fn create_schedule(
 
         let exists = schedule_exists(&scheduler, &schedule_name, &group_name).await?;
 
+        let params = ScheduleParams {
+            schedule_name: &schedule_name,
+            group_name: &group_name,
+            schedule_expression,
+            timezone,
+            ftw,
+            target,
+            description: &description,
+        };
+
         if exists {
-            update_schedule_with_retry(
-                &scheduler,
-                &schedule_name,
-                &group_name,
-                schedule_expression,
-                timezone,
-                ftw,
-                target,
-                &description,
-            )
-            .await?;
+            update_schedule_with_retry(&scheduler, &params).await?;
             eprintln!("✓ Updated: {schedule_name}");
         } else {
-            create_schedule_with_retry(
-                &scheduler,
-                &schedule_name,
-                &group_name,
-                schedule_expression,
-                timezone,
-                ftw,
-                target,
-                &description,
-            )
-            .await?;
+            create_schedule_with_retry(&scheduler, &params).await?;
             eprintln!("✓ Created: {schedule_name}");
         }
 
@@ -102,8 +97,7 @@ pub async fn create_schedule(
 /// List all schedules in the configured schedule group.
 ///
 /// Fetches schedule details concurrently to avoid sequential N+1 latency.
-pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
-    let cfg = Config::load()?;
+pub async fn list_schedules(aws_config: &aws_config::SdkConfig, cfg: &Config) -> Result<()> {
     let group_name = cfg.scheduler_group_name().to_string();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
 
@@ -203,8 +197,7 @@ fn parse_target_display(input: &str) -> Option<String> {
 }
 
 /// Delete a schedule by name.
-pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> Result<()> {
-    let cfg = Config::load()?;
+pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, cfg: &Config, name: &str) -> Result<()> {
     let group_name = cfg.scheduler_group_name().to_string();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
 

@@ -179,14 +179,19 @@ enum ScheduleAction {
         /// Desired task count
         count: i32,
         /// Schedule expression: cron(...), rate(...), or at(...)
-        #[arg(long)]
-        expr: String,
+        #[arg(long = "expression", alias = "expr")]
+        expression: String,
         /// IANA timezone for schedule expression (default: UTC)
         #[arg(long, default_value = "UTC")]
         timezone: String,
         /// IAM role ARN for EventBridge Scheduler execution (overrides config.toml)
         #[arg(long)]
         role_arn: Option<String>,
+        /// Explicit schedule name (overrides auto-generated name).
+        /// Use this to create multiple schedules for the same alias/count combination
+        /// (e.g. weekday vs weekend schedules).
+        #[arg(long = "schedule-name")]
+        schedule_name: Option<String>,
     },
     /// List all scaling schedules
     List,
@@ -229,9 +234,10 @@ async fn main() -> anyhow::Result<()> {
                 ScheduleAction::Create {
                     name,
                     count,
-                    expr,
+                    expression,
                     timezone,
                     role_arn,
+                    schedule_name,
                 } => {
                     // Resolve role ARN: --role-arn flag > config.toml > error
                     let resolved_role_arn = role_arn
@@ -245,17 +251,19 @@ async fn main() -> anyhow::Result<()> {
                         })?;
                     scheduler::create_schedule(
                         &aws_config,
+                        &cfg,
                         &name,
                         count,
-                        &expr,
+                        &expression,
                         &timezone,
                         &resolved_role_arn,
+                        schedule_name.as_deref(),
                     )
                     .await
                 }
-                ScheduleAction::List => scheduler::list_schedules(&aws_config).await,
+                ScheduleAction::List => scheduler::list_schedules(&aws_config, &cfg).await,
                 ScheduleAction::Delete { name } => {
-                    scheduler::delete_schedule(&aws_config, &name).await
+                    scheduler::delete_schedule(&aws_config, &cfg, &name).await
                 }
             }
         }

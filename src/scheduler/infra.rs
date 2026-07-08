@@ -145,9 +145,11 @@ pub fn validate_schedule_expression(expr: &str) -> Result<()> {
 
 /// Sanitize an alias name for use in a schedule name.
 ///
-/// Produces deterministic names in the form: `ecsctl-scale-{alias}-to-{count}`.
-/// When truncation is needed (64-char limit), appends a short hash of the full alias
-/// to prevent collisions between aliases that share a common prefix.
+/// Produces deterministic names in the form: `ecsctl-scale-{safe_alias}-to-{count}`.
+/// Appends a short hash suffix when:
+/// - The alias was normalized (contains characters replaced by '-'), to prevent
+///   collisions between aliases like `web/api` and `web-api`.
+/// - The name exceeds the 64-char limit and must be truncated.
 pub fn sanitize_schedule_name(alias: &str, count: i32) -> String {
     let safe_alias = alias.replace(
         |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
@@ -156,18 +158,25 @@ pub fn sanitize_schedule_name(alias: &str, count: i32) -> String {
     let suffix = format!("-to-{}", count);
     let prefix = "ecsctl-scale-";
 
+    let needs_hash = safe_alias != alias;
     let max_alias_len = 64 - prefix.len() - suffix.len();
-    if safe_alias.len() <= max_alias_len {
+
+    if !needs_hash && safe_alias.len() <= max_alias_len {
+        // No normalization, no truncation — use as-is.
         format!("{}{}{}", prefix, safe_alias, suffix)
     } else {
-        // When truncating, append a 6-char hash to prevent collisions.
-        // Hash the ORIGINAL alias (not safe_alias) to also distinguish aliases
-        // that differ only in characters normalized to '-'.
+        // Append a 6-char hash to prevent collisions from normalization or truncation.
+        // Hash the ORIGINAL alias to distinguish aliases that differ only in
+        // characters normalized to '-'.
         let hash = simple_hash(alias);
         let hash_suffix = format!("-{:06x}", hash & 0xFFFFFF);
-        let truncated_max = max_alias_len - hash_suffix.len();
-        let truncated = &safe_alias[..truncated_max];
-        format!("{}{}{}{}", prefix, truncated, hash_suffix, suffix)
+        let available = max_alias_len - hash_suffix.len();
+        let base = if safe_alias.len() <= available {
+            &safe_alias[..]
+        } else {
+            &safe_alias[..available]
+        };
+        format!("{}{}{}{}", prefix, base, hash_suffix, suffix)
     }
 }
 
@@ -208,88 +217,78 @@ pub async fn schedule_exists(
     }
 }
 
+/// Parameters for creating or updating a schedule.
+pub struct ScheduleParams<'a> {
+    pub schedule_name: &'a str,
+    pub group_name: &'a str,
+    pub schedule_expression: &'a str,
+    pub timezone: &'a str,
+    pub ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
+    pub target: aws_sdk_scheduler::types::Target,
+    pub description: &'a str,
+}
+
 /// Create a schedule with retry + exponential backoff to handle IAM propagation delay.
-#[allow(clippy::too_many_arguments)]
 pub async fn create_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
-    schedule_name: &str,
-    group_name: &str,
-    schedule_expression: &str,
-    timezone: &str,
-    ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
-    target: aws_sdk_scheduler::types::Target,
-    description: &str,
+    params: &ScheduleParams<'_>,
 ) -> Result<()> {
-    let max_attempts = 4;
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let ftw_clone = ftw.clone();
-        let target_clone = target.clone();
-        match scheduler
+    schedule_op_with_retry("create", || async {
+        scheduler
             .create_schedule()
-            .name(schedule_name)
-            .group_name(group_name)
-            .schedule_expression(schedule_expression)
-            .schedule_expression_timezone(timezone)
-            .flexible_time_window(ftw_clone)
-            .target(target_clone)
-            .description(description)
+            .name(params.schedule_name)
+            .group_name(params.group_name)
+            .schedule_expression(params.schedule_expression)
+            .schedule_expression_timezone(params.timezone)
+            .flexible_time_window(params.ftw.clone())
+            .target(params.target.clone())
+            .description(params.description)
             .send()
             .await
-        {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                if is_retryable_error(&e) && attempt < max_attempts {
-                    let delay = std::time::Duration::from_secs(5 * attempt as u64);
-                    eprintln!(
-                        "  ⏳ Retryable error, retrying in {}s (attempt {}/{})",
-                        delay.as_secs(),
-                        attempt,
-                        max_attempts
-                    );
-                    tokio::time::sleep(delay).await;
-                } else {
-                    return Err(e).context("failed to create schedule");
-                }
-            }
-        }
-    }
+            .map(|_| ())
+    })
+    .await
 }
 
 /// Update a schedule with retry + exponential backoff to handle IAM propagation delay.
-#[allow(clippy::too_many_arguments)]
 pub async fn update_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
-    schedule_name: &str,
-    group_name: &str,
-    schedule_expression: &str,
-    timezone: &str,
-    ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
-    target: aws_sdk_scheduler::types::Target,
-    description: &str,
+    params: &ScheduleParams<'_>,
 ) -> Result<()> {
+    schedule_op_with_retry("update", || async {
+        scheduler
+            .update_schedule()
+            .name(params.schedule_name)
+            .group_name(params.group_name)
+            .schedule_expression(params.schedule_expression)
+            .schedule_expression_timezone(params.timezone)
+            .flexible_time_window(params.ftw.clone())
+            .target(params.target.clone())
+            .description(params.description)
+            .send()
+            .await
+            .map(|_| ())
+    })
+    .await
+}
+
+/// Generic retry loop for schedule operations with exponential backoff.
+///
+/// Retries on IAM propagation errors and throttling (max 4 attempts, 5s/10s/15s/20s).
+async fn schedule_op_with_retry<F, Fut, E>(op_name: &str, op: F) -> Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<(), aws_sdk_scheduler::error::SdkError<E>>>,
+    E: aws_sdk_scheduler::error::ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
+{
     let max_attempts = 4;
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let ftw_clone = ftw.clone();
-        let target_clone = target.clone();
-        match scheduler
-            .update_schedule()
-            .name(schedule_name)
-            .group_name(group_name)
-            .schedule_expression(schedule_expression)
-            .schedule_expression_timezone(timezone)
-            .flexible_time_window(ftw_clone)
-            .target(target_clone)
-            .description(description)
-            .send()
-            .await
-        {
-            Ok(_) => return Ok(()),
+        match op().await {
+            Ok(()) => return Ok(()),
             Err(e) => {
-                if is_retryable_error(&e) && attempt < max_attempts {
+                if is_retryable_scheduler_error(&e) && attempt < max_attempts {
                     let delay = std::time::Duration::from_secs(5 * attempt as u64);
                     eprintln!(
                         "  ⏳ Retryable error, retrying in {}s (attempt {}/{})",
@@ -299,7 +298,7 @@ pub async fn update_schedule_with_retry(
                     );
                     tokio::time::sleep(delay).await;
                 } else {
-                    return Err(e).context("failed to update schedule");
+                    return Err(e).context(format!("failed to {op_name} schedule"));
                 }
             }
         }
@@ -307,8 +306,8 @@ pub async fn update_schedule_with_retry(
 }
 
 /// Check whether an SDK error is retryable (IAM propagation or throttling).
-fn is_retryable_error(
-    e: &aws_sdk_scheduler::error::SdkError<impl aws_sdk_scheduler::error::ProvideErrorMetadata>,
+fn is_retryable_scheduler_error<E: aws_sdk_scheduler::error::ProvideErrorMetadata>(
+    e: &aws_sdk_scheduler::error::SdkError<E>,
 ) -> bool {
     e.as_service_error()
         .map(|se| {
@@ -417,7 +416,13 @@ mod tests {
     #[test]
     fn test_sanitize_special_characters() {
         let name = sanitize_schedule_name("bot@special!name", 2);
-        assert_eq!(name, "ecsctl-scale-bot-special-name-to-2");
+        // Contains normalized chars → hash appended
+        assert!(name.starts_with("ecsctl-scale-bot-special-name-"));
+        assert!(name.ends_with("-to-2"));
+        assert!(name.len() <= 64);
+        // Different aliases that normalize the same should NOT collide
+        let name2 = sanitize_schedule_name("bot-special-name", 2);
+        assert_ne!(name, name2, "normalized aliases should not collide");
     }
 
     #[test]
@@ -455,17 +460,32 @@ mod tests {
     #[test]
     fn test_sanitize_normalization_collision_prevention() {
         // Aliases that differ only in characters normalized to '-' should still
-        // produce different schedule names when truncation activates the hash.
-        let alias1 = format!("{}", "a/b".repeat(30)); // contains '/' → '-'
-        let alias2 = format!("{}", "a-b".repeat(30)); // already '-'
-        let name1 = sanitize_schedule_name(&alias1, 0);
-        let name2 = sanitize_schedule_name(&alias2, 0);
-        // Both are long enough to trigger truncation+hash
+        // produce different schedule names — both short and long.
+
+        // Short aliases (no truncation, but normalization triggers hash)
+        let short1 = "web/api"; // '/' → '-'
+        let short2 = "web-api"; // already '-'
+        let name1 = sanitize_schedule_name(short1, 0);
+        let name2 = sanitize_schedule_name(short2, 0);
+        assert_ne!(
+            name1, name2,
+            "short aliases differing only in normalized chars should not collide"
+        );
+        // The non-normalized one should NOT have a hash
+        assert_eq!(name2, "ecsctl-scale-web-api-to-0");
+        // The normalized one SHOULD have a hash
+        assert!(name1.contains("-") && name1 != "ecsctl-scale-web-api-to-0");
+
+        // Long aliases (truncation + hash)
+        let long1 = "a/b".repeat(30); // contains '/' → '-'
+        let long2 = "a-b".repeat(30); // already '-'
+        let name1 = sanitize_schedule_name(&long1, 0);
+        let name2 = sanitize_schedule_name(&long2, 0);
         assert!(name1.len() <= 64);
         assert!(name2.len() <= 64);
         assert_ne!(
             name1, name2,
-            "aliases differing only in normalized chars should not collide"
+            "long aliases differing only in normalized chars should not collide"
         );
     }
 
@@ -522,5 +542,18 @@ mod tests {
     fn test_role_arn_policy_arn_rejected() {
         let err = validate_role_arn("arn:aws:iam::123456789012:policy/my-policy").unwrap_err();
         assert!(err.to_string().contains("must start with 'role/'"));
+    }
+
+    #[test]
+    fn test_role_arn_wrong_prefix() {
+        // 6-part ARN-like string but prefix is not "arn"
+        let err = validate_role_arn("notarn:aws:iam::123456789012:role/my-role").unwrap_err();
+        assert!(err.to_string().contains("must start with 'arn:'"));
+    }
+
+    #[test]
+    fn test_role_arn_empty_account() {
+        let err = validate_role_arn("arn:aws:iam:::role/my-role").unwrap_err();
+        assert!(err.to_string().contains("account ID must be numeric"));
     }
 }
