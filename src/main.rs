@@ -245,7 +245,6 @@ async fn main() -> anyhow::Result<()> {
                         })?;
                     scheduler::create_schedule(
                         &aws_config,
-                        &cfg,
                         &name,
                         count,
                         &expr,
@@ -254,9 +253,9 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await
                 }
-                ScheduleAction::List => scheduler::list_schedules(&aws_config, &cfg).await,
+                ScheduleAction::List => scheduler::list_schedules(&aws_config).await,
                 ScheduleAction::Delete { name } => {
-                    scheduler::delete_schedule(&aws_config, &cfg, &name).await
+                    scheduler::delete_schedule(&aws_config, &name).await
                 }
             }
         }

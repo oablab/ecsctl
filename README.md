@@ -14,6 +14,7 @@ An agent-first CLI that gives you a kubectl-like experience on Amazon ECS. Built
 - **Round-trip workflow** — `export` → edit → `apply`
 - **Clone** — `clone` a running service under a new name with optional overrides
 - **Scale** — `scale` a service to any desired task count (0 to N)
+- **Schedule** — `schedule` recurring scaling actions via EventBridge Scheduler (cron/rate)
 - **In-place update** — `update` a service with `--set` overrides without export/apply
 - **Sugar shell aliases** — `ecsh`, `ecscp`, `ecsync` for quick one-liners
 
@@ -38,6 +39,7 @@ ecsctl delete chaodu             # like: kubectl delete
 | `ecsctl delete <alias>` | Remove a service (scales to 0, deletes) |
 | `ecsctl restart <alias>` | Force a rolling restart |
 | `ecsctl scale <alias> <count>` | Scale a service to N desired tasks |
+| `ecsctl schedule create\|list\|delete` | Manage recurring scaling schedules |
 | `ecsctl update <alias> --set key=val` | Update a service in-place |
 | `ecsctl clone <src> <dst>` | Clone a service under a new name |
 | `ecsctl export <alias>` | Export a running service to YAML |
@@ -94,6 +96,42 @@ ecsctl scale @all 1            # bring up entire fleet
 ```
 
 Sets the desired task count for a service or all services in a `@group`. Use `--wait` to block until stable (single target only).
+
+### `ecsctl schedule` — manage recurring scaling schedules
+
+```bash
+# Create a schedule to scale down at night (Taipei time)
+ecsctl schedule create chaodu 0 --expr 'cron(0 22 * * ? *)' --timezone 'Asia/Taipei' --role-arn arn:aws:iam::123456789012:role/ecsctl-scheduler-role
+
+# Create a schedule for an entire group
+ecsctl schedule create @all 1 --expr 'cron(0 8 * * ? *)'
+
+# List all schedules (shows expression, timezone, target details)
+ecsctl schedule list
+
+# Delete a schedule by name
+ecsctl schedule delete ecsctl-scale-chaodu-to-0
+```
+
+Manages recurring ECS scaling schedules via [EventBridge Scheduler](https://docs.aws.amazon.com/scheduler/latest/UserGuide/what-is-scheduler.html). Schedules fire independently — no Lambda needed.
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--expr` | Schedule expression: `cron(...)`, `rate(...)`, or `at(...)` |
+| `--timezone` | IANA timezone (default: UTC) |
+| `--role-arn` | IAM role ARN for Scheduler execution (overrides config.toml) |
+
+**Config support:**
+
+```toml
+[scheduler]
+role_arn = "arn:aws:iam::123456789012:role/ecsctl-scheduler-role"
+group_name = "my-schedules"   # optional, default: "ecsctl-schedules"
+```
+
+The `role_arn` in config.toml is used when `--role-arn` is not provided on the command line.
 
 ### `ecsctl update` — update a service in-place
 
@@ -269,6 +307,10 @@ presign_expiry = 60
 
 [aliases]
 myapp = "my-cluster/my-service"
+
+[scheduler]
+role_arn = "arn:aws:iam::123456789012:role/ecsctl-scheduler-role"
+# group_name = "ecsctl-schedules"  # optional, default shown
 ```
 
 ## Requirements

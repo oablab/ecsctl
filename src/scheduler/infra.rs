@@ -96,6 +96,10 @@ pub fn validate_schedule_expression(expr: &str) -> Result<()> {
 }
 
 /// Sanitize an alias name for use in a schedule name.
+///
+/// Produces deterministic names in the form: `ecsctl-scale-{alias}-to-{count}`.
+/// When truncation is needed (64-char limit), appends a short hash of the full alias
+/// to prevent collisions between aliases that share a common prefix.
 pub fn sanitize_schedule_name(alias: &str, count: i32) -> String {
     let safe_alias = alias.replace(
         |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
@@ -103,13 +107,30 @@ pub fn sanitize_schedule_name(alias: &str, count: i32) -> String {
     );
     let suffix = format!("-to-{}", count);
     let prefix = "ecsctl-scale-";
+
     let max_alias_len = 64 - prefix.len() - suffix.len();
-    let truncated = if safe_alias.len() > max_alias_len {
-        &safe_alias[..max_alias_len]
+    if safe_alias.len() <= max_alias_len {
+        format!("{}{}{}", prefix, safe_alias, suffix)
     } else {
-        &safe_alias
-    };
-    format!("{}{}{}", prefix, truncated, suffix)
+        // When truncating, append a 6-char hash to prevent collisions.
+        // Hash the ORIGINAL alias (not safe_alias) to also distinguish aliases
+        // that differ only in characters normalized to '-'.
+        let hash = simple_hash(alias);
+        let hash_suffix = format!("-{:06x}", hash & 0xFFFFFF);
+        let truncated_max = max_alias_len - hash_suffix.len();
+        let truncated = &safe_alias[..truncated_max];
+        format!("{}{}{}{}", prefix, truncated, hash_suffix, suffix)
+    }
+}
+
+/// Simple deterministic hash (FNV-1a) for collision prevention.
+fn simple_hash(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in s.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Check if a schedule already exists.
@@ -139,116 +160,190 @@ pub async fn schedule_exists(
     }
 }
 
-/// Determine if an SDK error is a retryable IAM propagation issue.
-///
-/// Checks for ValidationException with messages indicating the scheduler
-/// cannot assume the provided role (IAM eventual consistency).
-fn is_retryable_iam_error(code: &str, message: &str) -> bool {
-    code == "ValidationException"
-        && (message.contains("unable to assume") || message.contains("cannot be assumed"))
-}
-
-/// Parameters for creating or updating a schedule.
-pub struct ScheduleParams<'a> {
-    pub schedule_name: &'a str,
-    pub group_name: &'a str,
-    pub schedule_expression: &'a str,
-    pub timezone: &'a str,
-    pub ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
-    pub target: aws_sdk_scheduler::types::Target,
-    pub is_update: bool,
-}
-
-/// Create or update a schedule with retry + exponential backoff to handle IAM propagation delay.
-///
-/// Both create and update can fail if the IAM role hasn't propagated yet,
-/// so we use a unified retry for both operations.
-pub async fn create_or_update_schedule_with_retry(
+/// Create a schedule with retry + exponential backoff to handle IAM propagation delay.
+pub async fn create_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
-    params: ScheduleParams<'_>,
+    schedule_name: &str,
+    group_name: &str,
+    schedule_expression: &str,
+    timezone: &str,
+    ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
+    target: aws_sdk_scheduler::types::Target,
+    description: &str,
 ) -> Result<()> {
     let max_attempts = 4;
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let ftw_clone = params.ftw.clone();
-        let target_clone = params.target.clone();
+        let ftw_clone = ftw.clone();
+        let target_clone = target.clone();
+        match scheduler
+            .create_schedule()
+            .name(schedule_name)
+            .group_name(group_name)
+            .schedule_expression(schedule_expression)
+            .schedule_expression_timezone(timezone)
+            .flexible_time_window(ftw_clone)
+            .target(target_clone)
+            .description(description)
+            .send()
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let is_retryable = e
+                    .as_service_error()
+                    .map(|se| {
+                        let code = se.code().unwrap_or("");
+                        let msg = se.message().unwrap_or("");
+                        // Retry on IAM propagation delay
+                        let iam_not_ready =
+                            msg.contains("role") || msg.contains("unable to assume");
+                        // Retry on throttling
+                        let throttled = code == "ThrottlingException"
+                            || code == "TooManyRequestsException";
+                        iam_not_ready || throttled
+                    })
+                    .unwrap_or(false);
 
-        // Execute the appropriate operation and extract retryability info
-        let (success, is_retryable, err_context) = if params.is_update {
-            match scheduler
-                .update_schedule()
-                .name(params.schedule_name)
-                .group_name(params.group_name)
-                .schedule_expression(params.schedule_expression)
-                .schedule_expression_timezone(params.timezone)
-                .flexible_time_window(ftw_clone)
-                .target(target_clone)
-                .send()
-                .await
-            {
-                Ok(_) => (true, false, None),
-                Err(e) => {
-                    let retryable = e
-                        .as_service_error()
-                        .map(|se| {
-                            is_retryable_iam_error(
-                                se.code().unwrap_or(""),
-                                se.message().unwrap_or(""),
-                            )
-                        })
-                        .unwrap_or(false);
-                    (false, retryable, Some(format!("{e}")))
+                if is_retryable && attempt < max_attempts {
+                    let delay = std::time::Duration::from_secs(5 * attempt as u64);
+                    eprintln!(
+                        "  ⏳ IAM role not yet propagated, retrying in {}s (attempt {}/{})",
+                        delay.as_secs(),
+                        attempt,
+                        max_attempts
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    return Err(e).context("failed to create schedule");
                 }
             }
-        } else {
-            match scheduler
-                .create_schedule()
-                .name(params.schedule_name)
-                .group_name(params.group_name)
-                .schedule_expression(params.schedule_expression)
-                .schedule_expression_timezone(params.timezone)
-                .flexible_time_window(ftw_clone)
-                .target(target_clone)
-                .send()
-                .await
-            {
-                Ok(_) => (true, false, None),
-                Err(e) => {
-                    let retryable = e
-                        .as_service_error()
-                        .map(|se| {
-                            is_retryable_iam_error(
-                                se.code().unwrap_or(""),
-                                se.message().unwrap_or(""),
-                            )
-                        })
-                        .unwrap_or(false);
-                    (false, retryable, Some(format!("{e}")))
-                }
-            }
-        };
-
-        if success {
-            return Ok(());
         }
+    }
+}
 
-        if is_retryable && attempt < max_attempts {
-            let delay = std::time::Duration::from_secs(5 * attempt as u64);
-            eprintln!(
-                "  ⏳ IAM role not yet propagated, retrying in {}s (attempt {}/{})",
-                delay.as_secs(),
-                attempt,
-                max_attempts
-            );
-            tokio::time::sleep(delay).await;
-        } else {
-            let op = if params.is_update { "update" } else { "create" };
-            anyhow::bail!(
-                "failed to {op} schedule '{}': {}",
-                params.schedule_name,
-                err_context.unwrap_or_else(|| "unknown error".to_string())
-            );
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- validate_schedule_expression tests ---
+
+    #[test]
+    fn test_valid_cron_expression() {
+        assert!(validate_schedule_expression("cron(0 8 * * ? *)").is_ok());
+        assert!(validate_schedule_expression("cron(30 22 * * ? 2024)").is_ok());
+        assert!(validate_schedule_expression("cron(0 0 1 1 ? *)").is_ok());
+    }
+
+    #[test]
+    fn test_cron_wrong_field_count() {
+        let err = validate_schedule_expression("cron(0 8 * * *)").unwrap_err();
+        assert!(err.to_string().contains("expected 6 fields"));
+
+        let err = validate_schedule_expression("cron(0 8 * * ? * extra)").unwrap_err();
+        assert!(err.to_string().contains("expected 6 fields"));
+    }
+
+    #[test]
+    fn test_valid_rate_expression() {
+        assert!(validate_schedule_expression("rate(5 minutes)").is_ok());
+        assert!(validate_schedule_expression("rate(1 hour)").is_ok());
+        assert!(validate_schedule_expression("rate(7 days)").is_ok());
+        assert!(validate_schedule_expression("rate(1 minute)").is_ok());
+    }
+
+    #[test]
+    fn test_rate_empty() {
+        let err = validate_schedule_expression("rate()").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_rate_invalid_value() {
+        let err = validate_schedule_expression("rate(abc minutes)").unwrap_err();
+        assert!(err.to_string().contains("not a positive integer"));
+    }
+
+    #[test]
+    fn test_rate_invalid_unit() {
+        let err = validate_schedule_expression("rate(5 weeks)").unwrap_err();
+        assert!(err.to_string().contains("not recognized"));
+    }
+
+    #[test]
+    fn test_rate_wrong_format() {
+        let err = validate_schedule_expression("rate(5)").unwrap_err();
+        assert!(err.to_string().contains("expected 'rate(<value> <unit>)'"));
+    }
+
+    #[test]
+    fn test_valid_at_expression() {
+        assert!(validate_schedule_expression("at(2024-01-01T00:00:00)").is_ok());
+        assert!(validate_schedule_expression("at(2026-12-31T23:59:59)").is_ok());
+    }
+
+    #[test]
+    fn test_at_empty() {
+        let err = validate_schedule_expression("at()").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_invalid_expression_format() {
+        let err = validate_schedule_expression("every 5 minutes").unwrap_err();
+        assert!(err.to_string().contains("Must start with"));
+
+        let err = validate_schedule_expression("").unwrap_err();
+        assert!(err.to_string().contains("Must start with"));
+    }
+
+    // --- sanitize_schedule_name tests ---
+
+    #[test]
+    fn test_sanitize_normal_name() {
+        let name = sanitize_schedule_name("chaodu", 0);
+        assert_eq!(name, "ecsctl-scale-chaodu-to-0");
+
+        let name = sanitize_schedule_name("my-bot", 1);
+        assert_eq!(name, "ecsctl-scale-my-bot-to-1");
+    }
+
+    #[test]
+    fn test_sanitize_special_characters() {
+        let name = sanitize_schedule_name("bot@special!name", 2);
+        assert_eq!(name, "ecsctl-scale-bot-special-name-to-2");
+    }
+
+    #[test]
+    fn test_sanitize_long_name_truncated_with_hash() {
+        let long_alias = "a".repeat(100);
+        let name = sanitize_schedule_name(&long_alias, 0);
+        // Must fit in 64 chars
+        assert!(name.len() <= 64, "name too long: {} chars", name.len());
+        // Must contain standard prefix/suffix
+        assert!(name.starts_with("ecsctl-scale-"));
+        assert!(name.ends_with("-to-0"));
+    }
+
+    #[test]
+    fn test_sanitize_truncation_different_aliases_no_collision() {
+        // Two long aliases with same prefix but different endings
+        // should produce different schedule names due to hash suffix
+        let alias1 = format!("{}{}", "a".repeat(50), "xxx");
+        let alias2 = format!("{}{}", "a".repeat(50), "yyy");
+        let name1 = sanitize_schedule_name(&alias1, 0);
+        let name2 = sanitize_schedule_name(&alias2, 0);
+        assert_ne!(
+            name1, name2,
+            "truncated aliases should not collide: {name1} vs {name2}"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_deterministic() {
+        let name1 = sanitize_schedule_name("test-alias", 5);
+        let name2 = sanitize_schedule_name("test-alias", 5);
+        assert_eq!(name1, name2);
     }
 }
