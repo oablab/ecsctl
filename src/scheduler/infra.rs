@@ -200,8 +200,8 @@ pub async fn create_schedule_with_retry(
                         let iam_not_ready =
                             msg.contains("role") || msg.contains("unable to assume");
                         // Retry on throttling
-                        let throttled = code == "ThrottlingException"
-                            || code == "TooManyRequestsException";
+                        let throttled =
+                            code == "ThrottlingException" || code == "TooManyRequestsException";
                         iam_not_ready || throttled
                     })
                     .unwrap_or(false);
