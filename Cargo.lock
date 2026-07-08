@@ -275,32 +275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-sdk-iam"
-version = "1.112.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7acc751928cdc586dfd0d5bddb73c08d146cfcad6eeee70efd93ad8e4a48e76"
-dependencies = [
- "arc-swap",
- "aws-credential-types",
- "aws-runtime",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-observability",
- "aws-smithy-query",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "aws-smithy-xml",
- "aws-types",
- "fastrand",
- "http 0.2.12",
- "http 1.4.1",
- "regex-lite",
- "tracing",
-]
-
-[[package]]
 name = "aws-sdk-s3"
 version = "1.135.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1194,7 +1168,6 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-ec2",
  "aws-sdk-ecs",
- "aws-sdk-iam",
  "aws-sdk-s3",
  "aws-sdk-scheduler",
  "aws-sdk-sts",
