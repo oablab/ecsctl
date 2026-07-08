@@ -197,7 +197,11 @@ fn parse_target_display(input: &str) -> Option<String> {
 }
 
 /// Delete a schedule by name.
-pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, cfg: &Config, name: &str) -> Result<()> {
+pub async fn delete_schedule(
+    aws_config: &aws_config::SdkConfig,
+    cfg: &Config,
+    name: &str,
+) -> Result<()> {
     let group_name = cfg.scheduler_group_name().to_string();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
 
