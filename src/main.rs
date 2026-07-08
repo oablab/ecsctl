@@ -252,12 +252,14 @@ async fn main() -> anyhow::Result<()> {
                     scheduler::create_schedule(
                         &aws_config,
                         &cfg,
-                        &name,
-                        count,
-                        &expression,
-                        &timezone,
-                        &resolved_role_arn,
-                        schedule_name.as_deref(),
+                        &scheduler::CreateScheduleOpts {
+                            name: &name,
+                            count,
+                            schedule_expression: &expression,
+                            timezone: &timezone,
+                            role_arn: &resolved_role_arn,
+                            explicit_name: schedule_name.as_deref(),
+                        },
                     )
                     .await
                 }

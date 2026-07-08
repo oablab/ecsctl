@@ -8,30 +8,35 @@ use super::infra::{
     update_schedule_with_retry, validate_role_arn, validate_schedule_expression, ScheduleParams,
 };
 
+/// Options for the create_schedule operation.
+pub struct CreateScheduleOpts<'a> {
+    pub name: &'a str,
+    pub count: i32,
+    pub schedule_expression: &'a str,
+    pub timezone: &'a str,
+    pub role_arn: &'a str,
+    pub explicit_name: Option<&'a str>,
+}
+
 /// Create EventBridge Scheduler schedules for a service or @group.
 ///
 /// Requires a user-provided `role_arn` — does NOT auto-create IAM roles.
 pub async fn create_schedule(
     aws_config: &aws_config::SdkConfig,
     cfg: &Config,
-    name: &str,
-    count: i32,
-    schedule_expression: &str,
-    timezone: &str,
-    role_arn: &str,
-    explicit_name: Option<&str>,
+    opts: &CreateScheduleOpts<'_>,
 ) -> Result<()> {
-    if count < 0 {
-        anyhow::bail!("count must be >= 0, got {count}");
+    if opts.count < 0 {
+        anyhow::bail!("count must be >= 0, got {}", opts.count);
     }
-    validate_schedule_expression(schedule_expression)?;
-    validate_role_arn(role_arn)?;
+    validate_schedule_expression(opts.schedule_expression)?;
+    validate_role_arn(opts.role_arn)?;
 
-    let targets = cfg.resolve_targets(name);
+    let targets = cfg.resolve_targets(opts.name);
     let group_name = cfg.scheduler_group_name().to_string();
 
     if targets.is_empty() {
-        anyhow::bail!("group '{}' is empty or not found", name);
+        anyhow::bail!("group '{}' is empty or not found", opts.name);
     }
 
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
@@ -40,25 +45,25 @@ pub async fn create_schedule(
     for alias in &targets {
         let (cluster, service) = cfg.resolve_alias(alias)?;
 
-        let schedule_name = match explicit_name {
+        let schedule_name = match opts.explicit_name {
             Some(n) if targets.len() == 1 => n.to_string(),
             Some(n) => format!("{}-{}", n, alias),
-            None => sanitize_schedule_name(alias, count),
+            None => sanitize_schedule_name(alias, opts.count),
         };
         let description = format!(
             "ecsctl: scale {} ({}/{}) to {}",
-            alias, cluster, service, count
+            alias, cluster, service, opts.count
         );
 
         let target_input = serde_json::json!({
             "Cluster": cluster,
             "Service": service,
-            "DesiredCount": count
+            "DesiredCount": opts.count
         });
 
         let target = aws_sdk_scheduler::types::Target::builder()
             .arn("arn:aws:scheduler:::aws-sdk:ecs:updateService")
-            .role_arn(role_arn)
+            .role_arn(opts.role_arn)
             .input(target_input.to_string())
             .build()?;
 
@@ -71,8 +76,8 @@ pub async fn create_schedule(
         let params = ScheduleParams {
             schedule_name: &schedule_name,
             group_name: &group_name,
-            schedule_expression,
-            timezone,
+            schedule_expression: opts.schedule_expression,
+            timezone: opts.timezone,
             ftw,
             target,
             description: &description,
@@ -86,8 +91,11 @@ pub async fn create_schedule(
             eprintln!("✓ Created: {schedule_name}");
         }
 
-        eprintln!("  Expression: {schedule_expression} ({timezone})");
-        eprintln!("  Action:     scale {alias} ({service}) to {count}");
+        eprintln!(
+            "  Expression: {} ({})",
+            opts.schedule_expression, opts.timezone
+        );
+        eprintln!("  Action:     scale {alias} ({service}) to {}", opts.count);
     }
 
     eprintln!("\n  Use 'ecsctl schedule list' to view all schedules");
