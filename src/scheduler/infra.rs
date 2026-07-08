@@ -139,8 +139,20 @@ pub async fn schedule_exists(
     }
 }
 
-/// Create a schedule with retry + exponential backoff to handle IAM propagation delay.
-pub async fn create_schedule_with_retry(
+/// Determine if an SDK error is a retryable IAM propagation issue.
+///
+/// Checks for ValidationException with messages indicating the scheduler
+/// cannot assume the provided role (IAM eventual consistency).
+fn is_retryable_iam_error(code: &str, message: &str) -> bool {
+    code == "ValidationException"
+        && (message.contains("unable to assume") || message.contains("cannot be assumed"))
+}
+
+/// Create or update a schedule with retry + exponential backoff to handle IAM propagation delay.
+///
+/// Both create and update can fail if the IAM role hasn't propagated yet,
+/// so we use a unified retry for both operations.
+pub async fn create_or_update_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
     schedule_name: &str,
     group_name: &str,
@@ -148,6 +160,7 @@ pub async fn create_schedule_with_retry(
     timezone: &str,
     ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
     target: aws_sdk_scheduler::types::Target,
+    is_update: bool,
 ) -> Result<()> {
     let max_attempts = 4;
     let mut attempt = 0;
@@ -155,40 +168,81 @@ pub async fn create_schedule_with_retry(
         attempt += 1;
         let ftw_clone = ftw.clone();
         let target_clone = target.clone();
-        match scheduler
-            .create_schedule()
-            .name(schedule_name)
-            .group_name(group_name)
-            .schedule_expression(schedule_expression)
-            .schedule_expression_timezone(timezone)
-            .flexible_time_window(ftw_clone)
-            .target(target_clone)
-            .send()
-            .await
-        {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                let is_retryable = e
-                    .as_service_error()
-                    .map(|se| {
-                        let msg = se.message().unwrap_or("");
-                        msg.contains("role") || msg.contains("unable to assume")
-                    })
-                    .unwrap_or(false);
 
-                if is_retryable && attempt < max_attempts {
-                    let delay = std::time::Duration::from_secs(5 * attempt as u64);
-                    eprintln!(
-                        "  ⏳ IAM role not yet propagated, retrying in {}s (attempt {}/{})",
-                        delay.as_secs(),
-                        attempt,
-                        max_attempts
-                    );
-                    tokio::time::sleep(delay).await;
-                } else {
-                    return Err(e).context("failed to create schedule");
+        // Execute the appropriate operation and extract retryability info
+        let (success, is_retryable, err_context) = if is_update {
+            match scheduler
+                .update_schedule()
+                .name(schedule_name)
+                .group_name(group_name)
+                .schedule_expression(schedule_expression)
+                .schedule_expression_timezone(timezone)
+                .flexible_time_window(ftw_clone)
+                .target(target_clone)
+                .send()
+                .await
+            {
+                Ok(_) => (true, false, None),
+                Err(e) => {
+                    let retryable = e
+                        .as_service_error()
+                        .map(|se| {
+                            is_retryable_iam_error(
+                                se.code().unwrap_or(""),
+                                se.message().unwrap_or(""),
+                            )
+                        })
+                        .unwrap_or(false);
+                    (false, retryable, Some(format!("{e}")))
                 }
             }
+        } else {
+            match scheduler
+                .create_schedule()
+                .name(schedule_name)
+                .group_name(group_name)
+                .schedule_expression(schedule_expression)
+                .schedule_expression_timezone(timezone)
+                .flexible_time_window(ftw_clone)
+                .target(target_clone)
+                .send()
+                .await
+            {
+                Ok(_) => (true, false, None),
+                Err(e) => {
+                    let retryable = e
+                        .as_service_error()
+                        .map(|se| {
+                            is_retryable_iam_error(
+                                se.code().unwrap_or(""),
+                                se.message().unwrap_or(""),
+                            )
+                        })
+                        .unwrap_or(false);
+                    (false, retryable, Some(format!("{e}")))
+                }
+            }
+        };
+
+        if success {
+            return Ok(());
+        }
+
+        if is_retryable && attempt < max_attempts {
+            let delay = std::time::Duration::from_secs(5 * attempt as u64);
+            eprintln!(
+                "  ⏳ IAM role not yet propagated, retrying in {}s (attempt {}/{})",
+                delay.as_secs(),
+                attempt,
+                max_attempts
+            );
+            tokio::time::sleep(delay).await;
+        } else {
+            let op = if is_update { "update" } else { "create" };
+            anyhow::bail!(
+                "failed to {op} schedule '{schedule_name}': {}",
+                err_context.unwrap_or_else(|| "unknown error".to_string())
+            );
         }
     }
 }

@@ -18,7 +18,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: b
     let ecs = EcsClient::new(config);
 
     for alias in &targets {
-        let (cluster, service) = resolve_alias(&cfg, alias)?;
+        let (cluster, service) = cfg.resolve_alias(alias)?;
         ecs.update_service()
             .cluster(cluster)
             .service(service)
@@ -32,27 +32,11 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: b
 
     if wait && targets.len() == 1 {
         let alias = &targets[0];
-        let (cluster, service) = resolve_alias(&cfg, alias)?;
+        let (cluster, service) = cfg.resolve_alias(alias)?;
         eprintln!("⏳ Waiting for service to stabilize...");
         crate::apply::wait_for_stable(&ecs, cluster, service).await?;
         eprintln!("✓ Service stable");
     }
 
     Ok(())
-}
-
-/// Resolve an alias to (cluster, service) from config.
-fn resolve_alias<'a>(cfg: &'a Config, alias: &str) -> Result<(&'a str, &'a str)> {
-    let target = cfg
-        .aliases
-        .get(alias)
-        .context(format!("alias '{alias}' not found"))?;
-
-    let parts: Vec<&str> = target.splitn(4, '/').collect();
-    match parts.len() {
-        2..=4 => Ok((parts[0], parts[1])),
-        _ => anyhow::bail!(
-            "invalid alias target for '{alias}': expected 'cluster/service', got '{target}'"
-        ),
-    }
 }

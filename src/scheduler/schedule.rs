@@ -3,17 +3,16 @@ use anyhow::{Context, Result};
 use crate::config::Config;
 
 use super::infra::{
-    create_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name, schedule_exists,
-    validate_schedule_expression,
+    create_or_update_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name,
+    schedule_exists, validate_schedule_expression,
 };
-
-const GROUP_NAME: &str = "ecsctl-schedules";
 
 /// Create EventBridge Scheduler schedules for a service or @group.
 ///
 /// Requires a user-provided `role_arn` — does NOT auto-create IAM roles.
 pub async fn create_schedule(
     aws_config: &aws_config::SdkConfig,
+    cfg: &Config,
     name: &str,
     count: i32,
     schedule_expression: &str,
@@ -25,18 +24,18 @@ pub async fn create_schedule(
     }
     validate_schedule_expression(schedule_expression)?;
 
-    let cfg = Config::load()?;
     let targets = cfg.resolve_targets(name);
 
     if targets.is_empty() {
         anyhow::bail!("group '{}' is empty or not found", name);
     }
 
+    let group_name = cfg.scheduler_group_name();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
-    ensure_schedule_group(&scheduler, GROUP_NAME).await?;
+    ensure_schedule_group(&scheduler, group_name).await?;
 
     for alias in &targets {
-        let (cluster, service) = resolve_alias(&cfg, alias)?;
+        let (cluster, service) = cfg.resolve_alias(alias)?;
 
         let schedule_name = sanitize_schedule_name(alias, count);
 
@@ -56,32 +55,23 @@ pub async fn create_schedule(
             .mode(aws_sdk_scheduler::types::FlexibleTimeWindowMode::Off)
             .build()?;
 
-        let exists = schedule_exists(&scheduler, &schedule_name, GROUP_NAME).await?;
+        let exists = schedule_exists(&scheduler, &schedule_name, group_name).await?;
+
+        create_or_update_schedule_with_retry(
+            &scheduler,
+            &schedule_name,
+            group_name,
+            schedule_expression,
+            timezone,
+            ftw,
+            target,
+            exists,
+        )
+        .await?;
 
         if exists {
-            scheduler
-                .update_schedule()
-                .name(&schedule_name)
-                .group_name(GROUP_NAME)
-                .schedule_expression(schedule_expression)
-                .schedule_expression_timezone(timezone)
-                .flexible_time_window(ftw)
-                .target(target)
-                .send()
-                .await
-                .context("failed to update schedule")?;
             eprintln!("✓ Updated: {schedule_name}");
         } else {
-            create_schedule_with_retry(
-                &scheduler,
-                &schedule_name,
-                GROUP_NAME,
-                schedule_expression,
-                timezone,
-                ftw,
-                target,
-            )
-            .await?;
             eprintln!("✓ Created: {schedule_name}");
         }
 
@@ -93,14 +83,15 @@ pub async fn create_schedule(
     Ok(())
 }
 
-/// List all schedules in the ecsctl-schedules group.
-pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
+/// List all schedules in the ecsctl schedule group.
+pub async fn list_schedules(aws_config: &aws_config::SdkConfig, cfg: &Config) -> Result<()> {
+    let group_name = cfg.scheduler_group_name();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
 
     let mut all = Vec::new();
     let mut next_token: Option<String> = None;
     loop {
-        let mut req = scheduler.list_schedules().group_name(GROUP_NAME);
+        let mut req = scheduler.list_schedules().group_name(group_name);
         if let Some(token) = &next_token {
             req = req.next_token(token);
         }
@@ -117,7 +108,7 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
                     .map(|se| se.is_resource_not_found_exception())
                     .unwrap_or(false)
                 {
-                    println!("No schedules found (group '{GROUP_NAME}' does not exist yet).");
+                    println!("No schedules found (group '{group_name}' does not exist yet).");
                     return Ok(());
                 }
                 return Err(e).context("failed to list schedules");
@@ -137,7 +128,7 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
         let (expr, tz) = match scheduler
             .get_schedule()
             .name(name)
-            .group_name(GROUP_NAME)
+            .group_name(group_name)
             .send()
             .await
         {
@@ -156,13 +147,18 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
 }
 
 /// Delete a schedule by name.
-pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> Result<()> {
+pub async fn delete_schedule(
+    aws_config: &aws_config::SdkConfig,
+    cfg: &Config,
+    name: &str,
+) -> Result<()> {
+    let group_name = cfg.scheduler_group_name();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
 
     match scheduler
         .delete_schedule()
         .name(name)
-        .group_name(GROUP_NAME)
+        .group_name(group_name)
         .send()
         .await
     {
@@ -172,28 +168,10 @@ pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> 
                 .map(|se| se.is_resource_not_found_exception())
                 .unwrap_or(false)
             {
-                anyhow::bail!("schedule '{name}' not found in group '{GROUP_NAME}'");
+                anyhow::bail!("schedule '{name}' not found in group '{group_name}'");
             }
             return Err(e).context("failed to delete schedule");
         }
     }
     Ok(())
-}
-
-// --- Helpers ---
-
-/// Resolve an alias to (cluster, service) from config.
-fn resolve_alias<'a>(cfg: &'a Config, alias: &str) -> Result<(&'a str, &'a str)> {
-    let target = cfg
-        .aliases
-        .get(alias)
-        .context(format!("alias '{alias}' not found"))?;
-
-    let parts: Vec<&str> = target.splitn(4, '/').collect();
-    match parts.len() {
-        2..=4 => Ok((parts[0], parts[1])),
-        _ => anyhow::bail!(
-            "invalid alias target for '{alias}': expected 'cluster/service', got '{target}'"
-        ),
-    }
 }

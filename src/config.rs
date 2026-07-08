@@ -77,4 +77,28 @@ impl Config {
     pub fn scheduler_role_arn(&self) -> Option<&str> {
         self.scheduler.as_ref().and_then(|s| s.role_arn.as_deref())
     }
+
+    /// Get the scheduler group name from config, or default to "ecsctl-schedules".
+    pub fn scheduler_group_name(&self) -> &str {
+        self.scheduler
+            .as_ref()
+            .and_then(|s| s.group_name.as_deref())
+            .unwrap_or("ecsctl-schedules")
+    }
+
+    /// Resolve an alias to (cluster, service) tuple.
+    pub fn resolve_alias(&self, alias: &str) -> anyhow::Result<(&str, &str)> {
+        let target = self
+            .aliases
+            .get(alias)
+            .ok_or_else(|| anyhow::anyhow!("alias '{alias}' not found"))?;
+
+        let parts: Vec<&str> = target.splitn(4, '/').collect();
+        match parts.len() {
+            2..=4 => Ok((parts[0], parts[1])),
+            _ => anyhow::bail!(
+                "invalid alias target for '{alias}': expected 'cluster/service', got '{target}'"
+            ),
+        }
+    }
 }
