@@ -1,6 +1,57 @@
 use anyhow::{Context, Result};
 use aws_sdk_scheduler::error::ProvideErrorMetadata;
 
+/// Validate that a role ARN has the correct format for an IAM role.
+///
+/// Expected format: `arn:aws:iam::<account-id>:role/<role-name>`
+/// This catches typos and wrong resource types (e.g. user ARN, policy ARN)
+/// before making API calls that would fail with opaque errors.
+pub fn validate_role_arn(role_arn: &str) -> Result<()> {
+    let parts: Vec<&str> = role_arn.splitn(6, ':').collect();
+    if parts.len() != 6 {
+        anyhow::bail!(
+            "invalid role ARN format: expected 'arn:aws:iam::<account-id>:role/<name>', got '{role_arn}'"
+        );
+    }
+    let prefix = parts[0];
+    let partition = parts[1];
+    let service = parts[2];
+    // parts[3] is region (empty for IAM)
+    let account = parts[4];
+    let resource = parts[5];
+
+    if prefix != "arn" {
+        anyhow::bail!("invalid role ARN: must start with 'arn:', got '{role_arn}'");
+    }
+    if !["aws", "aws-cn", "aws-us-gov"].contains(&partition) {
+        anyhow::bail!(
+            "invalid role ARN: unrecognized partition '{partition}'. Expected aws, aws-cn, or aws-us-gov"
+        );
+    }
+    if service != "iam" {
+        anyhow::bail!(
+            "invalid role ARN: service must be 'iam', got '{service}'. \
+             Make sure you're passing an IAM role ARN, not a {service} ARN"
+        );
+    }
+    if account.is_empty() || !account.chars().all(|c| c.is_ascii_digit()) {
+        anyhow::bail!(
+            "invalid role ARN: account ID must be numeric, got '{account}'"
+        );
+    }
+    if !resource.starts_with("role/") {
+        anyhow::bail!(
+            "invalid role ARN: resource must start with 'role/', got '{resource}'. \
+             Make sure you're passing an IAM role ARN, not a user or policy ARN"
+        );
+    }
+    let role_name = &resource[5..];
+    if role_name.is_empty() {
+        anyhow::bail!("invalid role ARN: role name cannot be empty");
+    }
+    Ok(())
+}
+
 /// Ensure the schedule group exists, creating it if not found.
 pub async fn ensure_schedule_group(
     scheduler: &aws_sdk_scheduler::Client,
@@ -192,22 +243,7 @@ pub async fn create_schedule_with_retry(
         {
             Ok(_) => return Ok(()),
             Err(e) => {
-                let is_retryable = e
-                    .as_service_error()
-                    .map(|se| {
-                        let code = se.code().unwrap_or("");
-                        let msg = se.message().unwrap_or("");
-                        // Retry on IAM propagation delay
-                        let iam_not_ready =
-                            msg.contains("role") || msg.contains("unable to assume");
-                        // Retry on throttling
-                        let throttled =
-                            code == "ThrottlingException" || code == "TooManyRequestsException";
-                        iam_not_ready || throttled
-                    })
-                    .unwrap_or(false);
-
-                if is_retryable && attempt < max_attempts {
+                if is_retryable_error(&e) && attempt < max_attempts {
                     let delay = std::time::Duration::from_secs(5 * attempt as u64);
                     eprintln!(
                         "  ⏳ Retryable error, retrying in {}s (attempt {}/{})",
@@ -222,6 +258,76 @@ pub async fn create_schedule_with_retry(
             }
         }
     }
+}
+
+/// Update a schedule with retry + exponential backoff to handle IAM propagation delay.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_schedule_with_retry(
+    scheduler: &aws_sdk_scheduler::Client,
+    schedule_name: &str,
+    group_name: &str,
+    schedule_expression: &str,
+    timezone: &str,
+    ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
+    target: aws_sdk_scheduler::types::Target,
+    description: &str,
+) -> Result<()> {
+    let max_attempts = 4;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let ftw_clone = ftw.clone();
+        let target_clone = target.clone();
+        match scheduler
+            .update_schedule()
+            .name(schedule_name)
+            .group_name(group_name)
+            .schedule_expression(schedule_expression)
+            .schedule_expression_timezone(timezone)
+            .flexible_time_window(ftw_clone)
+            .target(target_clone)
+            .description(description)
+            .send()
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if is_retryable_error(&e) && attempt < max_attempts {
+                    let delay = std::time::Duration::from_secs(5 * attempt as u64);
+                    eprintln!(
+                        "  ⏳ Retryable error, retrying in {}s (attempt {}/{})",
+                        delay.as_secs(),
+                        attempt,
+                        max_attempts
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    return Err(e).context("failed to update schedule");
+                }
+            }
+        }
+    }
+}
+
+/// Check whether an SDK error is retryable (IAM propagation or throttling).
+fn is_retryable_error(e: &aws_sdk_scheduler::error::SdkError<impl aws_sdk_scheduler::error::ProvideErrorMetadata>) -> bool {
+    e.as_service_error()
+        .map(|se| {
+            let code = se.code().unwrap_or("");
+            let msg = se.message().unwrap_or("").to_lowercase();
+            // Retry only on IAM propagation delay (role exists but not yet
+            // visible to the scheduler service). Permanent errors like
+            // "role ARN is invalid" or "not authorized to pass role" should
+            // NOT be retried.
+            let iam_not_ready = msg.contains("unable to assume")
+                || msg.contains("cannot be assumed")
+                || msg.contains("is not yet ready");
+            // Retry on throttling
+            let throttled =
+                code == "ThrottlingException" || code == "TooManyRequestsException";
+            iam_not_ready || throttled
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -372,5 +478,51 @@ mod tests {
         assert_eq!(name, "ecsctl-scale-web-to-0");
         // No hash pattern in short names
         assert!(!name.contains("-0") || name == "ecsctl-scale-web-to-0");
+    }
+
+    // --- validate_role_arn tests ---
+
+    #[test]
+    fn test_valid_role_arn() {
+        assert!(validate_role_arn("arn:aws:iam::123456789012:role/ecsctl-scheduler-role").is_ok());
+        assert!(validate_role_arn("arn:aws:iam::123456789012:role/path/to/role").is_ok());
+        assert!(validate_role_arn("arn:aws-cn:iam::123456789012:role/my-role").is_ok());
+        assert!(validate_role_arn("arn:aws-us-gov:iam::123456789012:role/gov-role").is_ok());
+    }
+
+    #[test]
+    fn test_role_arn_wrong_service() {
+        let err = validate_role_arn("arn:aws:ecs::123456789012:service/my-svc").unwrap_err();
+        assert!(err.to_string().contains("service must be 'iam'"));
+    }
+
+    #[test]
+    fn test_role_arn_wrong_resource_type() {
+        let err = validate_role_arn("arn:aws:iam::123456789012:user/admin").unwrap_err();
+        assert!(err.to_string().contains("must start with 'role/'"));
+    }
+
+    #[test]
+    fn test_role_arn_invalid_account() {
+        let err = validate_role_arn("arn:aws:iam::not-a-number:role/my-role").unwrap_err();
+        assert!(err.to_string().contains("account ID must be numeric"));
+    }
+
+    #[test]
+    fn test_role_arn_malformed() {
+        let err = validate_role_arn("not-an-arn").unwrap_err();
+        assert!(err.to_string().contains("invalid role ARN format"));
+    }
+
+    #[test]
+    fn test_role_arn_empty_role_name() {
+        let err = validate_role_arn("arn:aws:iam::123456789012:role/").unwrap_err();
+        assert!(err.to_string().contains("role name cannot be empty"));
+    }
+
+    #[test]
+    fn test_role_arn_policy_arn_rejected() {
+        let err = validate_role_arn("arn:aws:iam::123456789012:policy/my-policy").unwrap_err();
+        assert!(err.to_string().contains("must start with 'role/'"));
     }
 }

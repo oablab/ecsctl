@@ -5,7 +5,7 @@ use crate::config::Config;
 
 use super::infra::{
     create_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name, schedule_exists,
-    validate_schedule_expression,
+    update_schedule_with_retry, validate_role_arn, validate_schedule_expression,
 };
 
 /// Create EventBridge Scheduler schedules for a service or @group.
@@ -23,6 +23,7 @@ pub async fn create_schedule(
         anyhow::bail!("count must be >= 0, got {count}");
     }
     validate_schedule_expression(schedule_expression)?;
+    validate_role_arn(role_arn)?;
 
     let cfg = Config::load()?;
     let targets = cfg.resolve_targets(name);
@@ -36,7 +37,7 @@ pub async fn create_schedule(
     ensure_schedule_group(&scheduler, &group_name).await?;
 
     for alias in &targets {
-        let (cluster, service) = resolve_alias(&cfg, alias)?;
+        let (cluster, service) = cfg.resolve_alias(alias)?;
 
         let schedule_name = sanitize_schedule_name(alias, count);
         let description = format!(
@@ -63,18 +64,17 @@ pub async fn create_schedule(
         let exists = schedule_exists(&scheduler, &schedule_name, &group_name).await?;
 
         if exists {
-            scheduler
-                .update_schedule()
-                .name(&schedule_name)
-                .group_name(&group_name)
-                .schedule_expression(schedule_expression)
-                .schedule_expression_timezone(timezone)
-                .flexible_time_window(ftw)
-                .target(target)
-                .description(&description)
-                .send()
-                .await
-                .context("failed to update schedule")?;
+            update_schedule_with_retry(
+                &scheduler,
+                &schedule_name,
+                &group_name,
+                schedule_expression,
+                timezone,
+                ftw,
+                target,
+                &description,
+            )
+            .await?;
             eprintln!("✓ Updated: {schedule_name}");
         } else {
             create_schedule_with_retry(
@@ -229,20 +229,4 @@ pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> 
     Ok(())
 }
 
-// --- Helpers ---
 
-/// Resolve an alias to (cluster, service) from config.
-fn resolve_alias<'a>(cfg: &'a Config, alias: &str) -> Result<(&'a str, &'a str)> {
-    let target = cfg
-        .aliases
-        .get(alias)
-        .context(format!("alias '{alias}' not found"))?;
-
-    let parts: Vec<&str> = target.splitn(4, '/').collect();
-    match parts.len() {
-        2..=4 => Ok((parts[0], parts[1])),
-        _ => anyhow::bail!(
-            "invalid alias target for '{alias}': expected 'cluster/service', got '{target}'"
-        ),
-    }
-}
