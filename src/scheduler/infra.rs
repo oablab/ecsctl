@@ -209,7 +209,7 @@ pub async fn create_schedule_with_retry(
                 if is_retryable && attempt < max_attempts {
                     let delay = std::time::Duration::from_secs(5 * attempt as u64);
                     eprintln!(
-                        "  ⏳ IAM role not yet propagated, retrying in {}s (attempt {}/{})",
+                        "  ⏳ Retryable error, retrying in {}s (attempt {}/{})",
                         delay.as_secs(),
                         attempt,
                         max_attempts
@@ -345,5 +345,31 @@ mod tests {
         let name1 = sanitize_schedule_name("test-alias", 5);
         let name2 = sanitize_schedule_name("test-alias", 5);
         assert_eq!(name1, name2);
+    }
+
+    #[test]
+    fn test_sanitize_normalization_collision_prevention() {
+        // Aliases that differ only in characters normalized to '-' should still
+        // produce different schedule names when truncation activates the hash.
+        let alias1 = format!("{}", "a/b".repeat(30)); // contains '/' → '-'
+        let alias2 = format!("{}", "a-b".repeat(30)); // already '-'
+        let name1 = sanitize_schedule_name(&alias1, 0);
+        let name2 = sanitize_schedule_name(&alias2, 0);
+        // Both are long enough to trigger truncation+hash
+        assert!(name1.len() <= 64);
+        assert!(name2.len() <= 64);
+        assert_ne!(
+            name1, name2,
+            "aliases differing only in normalized chars should not collide"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_short_names_no_hash() {
+        // Short names should be used as-is without hash suffix
+        let name = sanitize_schedule_name("web", 0);
+        assert_eq!(name, "ecsctl-scale-web-to-0");
+        // No hash pattern in short names
+        assert!(!name.contains("-0") || name == "ecsctl-scale-web-to-0");
     }
 }

@@ -87,6 +87,9 @@ impl Config {
     }
 
     /// Resolve an alias to (cluster, service) tuple.
+    ///
+    /// Note: does NOT expand `@group` prefixes — call [`resolve_targets`](Self::resolve_targets)
+    /// first to expand groups into individual alias names, then call this for each.
     pub fn resolve_alias(&self, alias: &str) -> anyhow::Result<(&str, &str)> {
         let target = self
             .aliases
