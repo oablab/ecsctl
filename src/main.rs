@@ -80,13 +80,13 @@ enum Command {
         /// Desired task count (0 to N)
         count: i32,
         /// Wait for deployment to stabilize
-        #[arg(long)]
+        #[arg(long, conflicts_with = "with_schedule")]
         wait: bool,
         /// Create a recurring schedule (EventBridge Scheduler) instead of immediate scale
         #[arg(long)]
         with_schedule: Option<String>,
         /// IANA timezone for schedule expression (default: UTC)
-        #[arg(long, default_value = "UTC")]
+        #[arg(long, default_value = "UTC", requires = "with_schedule")]
         timezone: String,
     },
     /// Manage scaling schedules

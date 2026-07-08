@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use aws_sdk_ecs::Client as EcsClient;
+use aws_sdk_scheduler::error::ProvideErrorMetadata;
 
 use crate::config::Config;
 
@@ -18,66 +19,26 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: b
     let ecs = EcsClient::new(config);
 
     for alias in &targets {
-        scale_alias(&ecs, &cfg, alias, count).await?;
+        let (cluster, service) = resolve_alias(&cfg, alias)?;
+        ecs.update_service()
+            .cluster(cluster)
+            .service(service)
+            .desired_count(count)
+            .force_new_deployment(true)
+            .send()
+            .await
+            .context(format!("UpdateService failed for {alias}"))?;
+        eprintln!("✓ {alias} → desired_count={count}");
     }
 
     if wait && targets.len() == 1 {
         let alias = &targets[0];
-        let target = cfg.aliases.get(alias).unwrap();
-        let parts: Vec<&str> = target.splitn(4, '/').collect();
-        let (cluster, service) = (parts[0], parts[1]);
+        let (cluster, service) = resolve_alias(&cfg, alias)?;
         eprintln!("⏳ Waiting for service to stabilize...");
         crate::apply::wait_for_stable(&ecs, cluster, service).await?;
         eprintln!("✓ Service stable");
     }
 
-    Ok(())
-}
-
-/// Scale a single alias by resolving it to cluster/service.
-pub async fn scale_service(
-    ecs: &EcsClient,
-    cluster: &str,
-    service: &str,
-    count: i32,
-    force: bool,
-) -> Result<()> {
-    let mut req = ecs
-        .update_service()
-        .cluster(cluster)
-        .service(service)
-        .desired_count(count);
-    if force {
-        req = req.force_new_deployment(true);
-    }
-    req.send()
-        .await
-        .context(format!("UpdateService failed for {}/{}", cluster, service))?;
-    Ok(())
-}
-
-async fn scale_alias(ecs: &EcsClient, cfg: &Config, alias: &str, count: i32) -> Result<()> {
-    let target = cfg
-        .aliases
-        .get(alias)
-        .context(format!("alias '{alias}' not found"))?;
-
-    let parts: Vec<&str> = target.splitn(4, '/').collect();
-    let (cluster, service) = match parts.len() {
-        2..=4 => (parts[0], parts[1]),
-        _ => anyhow::bail!("invalid alias target for '{alias}'"),
-    };
-
-    ecs.update_service()
-        .cluster(cluster)
-        .service(service)
-        .desired_count(count)
-        .force_new_deployment(true)
-        .send()
-        .await
-        .context(format!("UpdateService failed for {alias}"))?;
-
-    eprintln!("✓ {alias} → desired_count={count}");
     Ok(())
 }
 
@@ -116,20 +77,22 @@ pub async fn run_with_schedule(
         .map(|r| r.to_string())
         .unwrap_or_else(|| "us-east-1".to_string());
 
+    // Collect cluster ARNs for scoped IAM policy
+    let mut cluster_arns: Vec<String> = Vec::new();
+    for alias in &targets {
+        let (cluster, _service) = resolve_alias(&cfg, alias)?;
+        let arn = format!("arn:aws:ecs:{region}:{account_id}:service/{cluster}/*");
+        if !cluster_arns.contains(&arn) {
+            cluster_arns.push(arn);
+        }
+    }
+
     let group_name = "ecsctl-schedules";
     ensure_schedule_group(&scheduler, group_name).await?;
-    let role_arn = ensure_scheduler_role(&iam, account_id, &region).await?;
+    let role_arn = ensure_scheduler_role(&iam, account_id, &region, &cluster_arns).await?;
 
     for alias in &targets {
-        let target = cfg
-            .aliases
-            .get(alias)
-            .context(format!("alias '{alias}' not found"))?;
-        let parts: Vec<&str> = target.splitn(4, '/').collect();
-        let (cluster, service) = match parts.len() {
-            2..=4 => (parts[0], parts[1]),
-            _ => anyhow::bail!("invalid alias target for '{alias}'"),
-        };
+        let (cluster, service) = resolve_alias(&cfg, alias)?;
 
         let safe_alias = alias.replace(
             |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
@@ -177,17 +140,16 @@ pub async fn run_with_schedule(
                 .context("failed to update schedule")?;
             eprintln!("✓ Updated: {schedule_name}");
         } else {
-            scheduler
-                .create_schedule()
-                .name(&schedule_name)
-                .group_name(group_name)
-                .schedule_expression(schedule_expression)
-                .schedule_expression_timezone(timezone)
-                .flexible_time_window(ftw)
-                .target(target)
-                .send()
-                .await
-                .context("failed to create schedule")?;
+            create_schedule_with_retry(
+                &scheduler,
+                &schedule_name,
+                group_name,
+                schedule_expression,
+                timezone,
+                ftw,
+                target,
+            )
+            .await?;
             eprintln!("✓ Created: {schedule_name}");
         }
 
@@ -290,6 +252,22 @@ pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> 
 
 // --- Helpers ---
 
+/// Resolve an alias to (cluster, service) from config.
+fn resolve_alias<'a>(cfg: &'a Config, alias: &str) -> Result<(&'a str, &'a str)> {
+    let target = cfg
+        .aliases
+        .get(alias)
+        .context(format!("alias '{alias}' not found"))?;
+
+    let parts: Vec<&str> = target.splitn(4, '/').collect();
+    match parts.len() {
+        2..=4 => Ok((parts[0], parts[1])),
+        _ => anyhow::bail!(
+            "invalid alias target for '{alias}': expected 'cluster/service', got '{target}'"
+        ),
+    }
+}
+
 fn validate_schedule_expression(expr: &str) -> Result<()> {
     let trimmed = expr.trim();
     if trimmed.starts_with("cron(") && trimmed.ends_with(')') {
@@ -297,20 +275,50 @@ fn validate_schedule_expression(expr: &str) -> Result<()> {
         let fields: Vec<&str> = inner.split_whitespace().collect();
         if fields.len() != 6 {
             anyhow::bail!(
-                "invalid cron: expected 6 fields (min hour dom month dow year), got {}. Example: cron(0 8 * * ? *)",
+                "invalid cron: expected 6 fields (min hour dom month dow year), got {}. \
+                 Example: cron(0 8 * * ? *)",
                 fields.len()
             );
         }
     } else if trimmed.starts_with("rate(") && trimmed.ends_with(')') {
-        let inner = &trimmed[5..trimmed.len() - 1].trim();
+        let inner = trimmed[5..trimmed.len() - 1].trim();
         if inner.is_empty() {
             anyhow::bail!("invalid rate expression: rate() is empty");
         }
+        // Validate rate format: <number> <unit>
+        let parts: Vec<&str> = inner.split_whitespace().collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "invalid rate expression: expected 'rate(<value> <unit>)', got 'rate({inner})'. \
+                 Example: rate(5 minutes)"
+            );
+        }
+        if parts[0].parse::<u64>().is_err() {
+            anyhow::bail!(
+                "invalid rate expression: value '{}' is not a positive integer",
+                parts[0]
+            );
+        }
+        let valid_units = ["minute", "minutes", "hour", "hours", "day", "days"];
+        if !valid_units.contains(&parts[1]) {
+            anyhow::bail!(
+                "invalid rate expression: unit '{}' not recognized. \
+                 Valid units: minute(s), hour(s), day(s)",
+                parts[1]
+            );
+        }
     } else if trimmed.starts_with("at(") && trimmed.ends_with(')') {
-        // at() one-time — basic validation
+        let inner = trimmed[3..trimmed.len() - 1].trim();
+        if inner.is_empty() {
+            anyhow::bail!(
+                "invalid at expression: at() is empty. \
+                 Example: at(2024-01-01T00:00:00)"
+            );
+        }
     } else {
         anyhow::bail!(
-            "invalid schedule expression. Must start with cron(...), rate(...), or at(...). Got: '{trimmed}'"
+            "invalid schedule expression. Must start with cron(...), rate(...), or at(...). \
+             Got: '{trimmed}'"
         );
     }
     Ok(())
@@ -342,45 +350,123 @@ async fn schedule_exists(
     }
 }
 
+/// Create a schedule with retry+backoff to handle IAM propagation delay.
+async fn create_schedule_with_retry(
+    scheduler: &aws_sdk_scheduler::Client,
+    schedule_name: &str,
+    group_name: &str,
+    schedule_expression: &str,
+    timezone: &str,
+    ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
+    target: aws_sdk_scheduler::types::Target,
+) -> Result<()> {
+    let max_attempts = 4;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let ftw_clone = ftw.clone();
+        let target_clone = target.clone();
+        match scheduler
+            .create_schedule()
+            .name(schedule_name)
+            .group_name(group_name)
+            .schedule_expression(schedule_expression)
+            .schedule_expression_timezone(timezone)
+            .flexible_time_window(ftw_clone)
+            .target(target_clone)
+            .send()
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                // Retry on role-not-ready errors (IAM propagation)
+                let is_retryable = e
+                    .as_service_error()
+                    .map(|se| {
+                        let msg = se.message().unwrap_or("");
+                        msg.contains("role") || msg.contains("unable to assume")
+                    })
+                    .unwrap_or(false);
+
+                if is_retryable && attempt < max_attempts {
+                    let delay = std::time::Duration::from_secs(5 * attempt as u64);
+                    eprintln!(
+                        "  ⏳ IAM role not yet propagated, retrying in {}s (attempt {}/{})",
+                        delay.as_secs(),
+                        attempt,
+                        max_attempts
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    return Err(e).context("failed to create schedule");
+                }
+            }
+        }
+    }
+}
+
 async fn ensure_schedule_group(
     scheduler: &aws_sdk_scheduler::Client,
     group_name: &str,
 ) -> Result<()> {
-    if scheduler
-        .get_schedule_group()
+    // Check if group exists, discriminating ResourceNotFoundException from other errors
+    match scheduler.get_schedule_group().name(group_name).send().await {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            if !e
+                .as_service_error()
+                .map(|se| se.is_resource_not_found_exception())
+                .unwrap_or(false)
+            {
+                return Err(e).context("failed to check schedule group");
+            }
+            // ResourceNotFoundException — proceed to create
+        }
+    }
+
+    // Create group, handle race condition (ConflictException = already exists)
+    match scheduler
+        .create_schedule_group()
         .name(group_name)
         .send()
         .await
-        .is_err()
     {
-        let result = scheduler
-            .create_schedule_group()
-            .name(group_name)
-            .send()
-            .await;
-        if let Err(e) = result {
-            if !e
-                .as_service_error()
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if e.as_service_error()
                 .map(|se| se.is_conflict_exception())
                 .unwrap_or(false)
             {
-                anyhow::bail!("failed to create schedule group: {e}");
+                Ok(()) // Another process created it — safe
+            } else {
+                Err(e).context("failed to create schedule group")
             }
         }
     }
-    Ok(())
 }
 
 async fn ensure_scheduler_role(
     iam: &aws_sdk_iam::Client,
     account_id: &str,
     region: &str,
+    cluster_arns: &[String],
 ) -> Result<String> {
     let role_name = "ecsctl-scheduler-role";
     let role_arn = format!("arn:aws:iam::{account_id}:role/{role_name}");
 
-    if iam.get_role().role_name(role_name).send().await.is_ok() {
-        return Ok(role_arn);
+    // C1: Discriminate NoSuchEntity from other errors
+    match iam.get_role().role_name(role_name).send().await {
+        Ok(_) => return Ok(role_arn),
+        Err(e) => {
+            if !e
+                .as_service_error()
+                .map(|se| se.is_no_such_entity_exception())
+                .unwrap_or(false)
+            {
+                return Err(e).context("failed to check scheduler role");
+            }
+            // NoSuchEntity — proceed to create
+        }
     }
 
     let trust_policy = serde_json::json!({
@@ -398,20 +484,41 @@ async fn ensure_scheduler_role(
         }]
     });
 
-    iam.create_role()
+    // C2: Handle EntityAlreadyExistsException (race condition)
+    match iam
+        .create_role()
         .role_name(role_name)
         .assume_role_policy_document(trust_policy.to_string())
         .description("EventBridge Scheduler role for ecsctl scale commands")
         .send()
         .await
-        .context("failed to create scheduler role")?;
+    {
+        Ok(_) => {}
+        Err(e) => {
+            if e.as_service_error()
+                .map(|se| se.is_entity_already_exists_exception())
+                .unwrap_or(false)
+            {
+                // Another process created it — safe to continue
+                return Ok(role_arn);
+            }
+            return Err(e).context("failed to create scheduler role");
+        }
+    }
+
+    // C4: Scope IAM policy to specific clusters instead of wildcard
+    let resources: Vec<String> = if cluster_arns.is_empty() {
+        vec![format!("arn:aws:ecs:{region}:{account_id}:service/*/*")]
+    } else {
+        cluster_arns.to_vec()
+    };
 
     let policy = serde_json::json!({
         "Version": "2012-10-17",
         "Statement": [{
             "Effect": "Allow",
             "Action": "ecs:UpdateService",
-            "Resource": format!("arn:aws:ecs:{region}:{account_id}:service/*/*")
+            "Resource": resources
         }]
     });
 
@@ -422,9 +529,6 @@ async fn ensure_scheduler_role(
         .send()
         .await
         .context("failed to attach policy to scheduler role")?;
-
-    // Wait for IAM propagation
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     Ok(role_arn)
 }
