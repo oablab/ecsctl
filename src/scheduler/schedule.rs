@@ -228,5 +228,3 @@ pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> 
     }
     Ok(())
 }
-
-

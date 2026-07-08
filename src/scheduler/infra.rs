@@ -35,9 +35,7 @@ pub fn validate_role_arn(role_arn: &str) -> Result<()> {
         );
     }
     if account.is_empty() || !account.chars().all(|c| c.is_ascii_digit()) {
-        anyhow::bail!(
-            "invalid role ARN: account ID must be numeric, got '{account}'"
-        );
+        anyhow::bail!("invalid role ARN: account ID must be numeric, got '{account}'");
     }
     if !resource.starts_with("role/") {
         anyhow::bail!(
@@ -310,7 +308,9 @@ pub async fn update_schedule_with_retry(
 }
 
 /// Check whether an SDK error is retryable (IAM propagation or throttling).
-fn is_retryable_error(e: &aws_sdk_scheduler::error::SdkError<impl aws_sdk_scheduler::error::ProvideErrorMetadata>) -> bool {
+fn is_retryable_error(
+    e: &aws_sdk_scheduler::error::SdkError<impl aws_sdk_scheduler::error::ProvideErrorMetadata>,
+) -> bool {
     e.as_service_error()
         .map(|se| {
             let code = se.code().unwrap_or("");
@@ -323,8 +323,7 @@ fn is_retryable_error(e: &aws_sdk_scheduler::error::SdkError<impl aws_sdk_schedu
                 || msg.contains("cannot be assumed")
                 || msg.contains("is not yet ready");
             // Retry on throttling
-            let throttled =
-                code == "ThrottlingException" || code == "TooManyRequestsException";
+            let throttled = code == "ThrottlingException" || code == "TooManyRequestsException";
             iam_not_ready || throttled
         })
         .unwrap_or(false)
