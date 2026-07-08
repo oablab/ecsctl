@@ -218,14 +218,14 @@ pub async fn schedule_exists(
 }
 
 /// Parameters for creating or updating a schedule.
-pub struct ScheduleParams<'a> {
-    pub schedule_name: &'a str,
-    pub group_name: &'a str,
-    pub schedule_expression: &'a str,
-    pub timezone: &'a str,
-    pub ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
-    pub target: aws_sdk_scheduler::types::Target,
-    pub description: &'a str,
+pub(crate) struct ScheduleParams<'a> {
+    pub(crate) schedule_name: &'a str,
+    pub(crate) group_name: &'a str,
+    pub(crate) schedule_expression: &'a str,
+    pub(crate) timezone: &'a str,
+    pub(crate) ftw: aws_sdk_scheduler::types::FlexibleTimeWindow,
+    pub(crate) target: aws_sdk_scheduler::types::Target,
+    pub(crate) description: &'a str,
 }
 
 /// Create a schedule with retry + exponential backoff to handle IAM propagation delay.
