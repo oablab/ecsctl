@@ -46,8 +46,23 @@ pub async fn create_schedule(
         let (cluster, service) = cfg.resolve_alias(alias)?;
 
         let schedule_name = match opts.explicit_name {
-            Some(n) if targets.len() == 1 => n.to_string(),
-            Some(n) => format!("{}-{}", n, alias),
+            Some(n) => {
+                let raw = if targets.len() == 1 {
+                    n.to_string()
+                } else {
+                    format!("{}-{}", n, alias)
+                };
+                // Sanitize and enforce 64-char limit for explicit names
+                let sanitized = raw.replace(
+                    |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
+                    "-",
+                );
+                if sanitized.len() > 64 {
+                    sanitized[..64].to_string()
+                } else {
+                    sanitized
+                }
+            }
             None => sanitize_schedule_name(alias, opts.count),
         };
         let description = format!(
