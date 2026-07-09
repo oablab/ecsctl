@@ -4,9 +4,17 @@ use futures::future::join_all;
 use crate::config::Config;
 
 use super::infra::{
-    create_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name, schedule_exists,
+    create_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name,
     update_schedule_with_retry, validate_role_arn, validate_schedule_expression, ScheduleParams,
 };
+
+/// Check if an anyhow error chain contains a ConflictException (schedule already exists).
+fn is_conflict_error(e: &anyhow::Error) -> bool {
+    // The error is wrapped by .context() in schedule_op_with_retry, so we walk
+    // the chain looking for the ConflictException indicator in the error message.
+    let msg = format!("{:#}", e);
+    msg.contains("ConflictException")
+}
 
 /// Options for the create_schedule operation.
 pub struct CreateScheduleOpts<'a> {
@@ -86,8 +94,6 @@ pub async fn create_schedule(
             .mode(aws_sdk_scheduler::types::FlexibleTimeWindowMode::Off)
             .build()?;
 
-        let exists = schedule_exists(&scheduler, &schedule_name, &group_name).await?;
-
         let params = ScheduleParams {
             schedule_name: &schedule_name,
             group_name: &group_name,
@@ -98,12 +104,17 @@ pub async fn create_schedule(
             description: &description,
         };
 
-        if exists {
-            update_schedule_with_retry(&scheduler, &params).await?;
-            eprintln!("✓ Updated: {schedule_name}");
-        } else {
-            create_schedule_with_retry(&scheduler, &params).await?;
-            eprintln!("✓ Created: {schedule_name}");
+        // Optimistic create — if it conflicts (already exists), fall back to update.
+        // This avoids the TOCTOU race in check-then-act patterns.
+        match create_schedule_with_retry(&scheduler, &params).await {
+            Ok(()) => {
+                eprintln!("✓ Created: {schedule_name}");
+            }
+            Err(e) if is_conflict_error(&e) => {
+                update_schedule_with_retry(&scheduler, &params).await?;
+                eprintln!("✓ Updated: {schedule_name}");
+            }
+            Err(e) => return Err(e),
         }
 
         eprintln!(
@@ -225,6 +236,9 @@ pub async fn delete_schedule(
     cfg: &Config,
     name: &str,
 ) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("schedule name cannot be empty");
+    }
     let group_name = cfg.scheduler_group_name().to_string();
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
 

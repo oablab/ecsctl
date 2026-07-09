@@ -274,7 +274,7 @@ pub async fn update_schedule_with_retry(
 
 /// Generic retry loop for schedule operations with exponential backoff.
 ///
-/// Retries on IAM propagation errors and throttling (max 4 attempts, 5s/10s/15s/20s).
+/// Retries on IAM propagation errors and throttling (max 4 attempts: 1 initial + 3 retries at 5s/10s/15s).
 async fn schedule_op_with_retry<F, Fut, E>(op_name: &str, op: F) -> Result<()>
 where
     F: Fn() -> Fut,
