@@ -5,8 +5,8 @@ use crate::config::Config;
 
 use super::infra::{
     create_schedule_with_retry, ensure_schedule_group, sanitize_explicit_name,
-    sanitize_schedule_name, CreateOutcome, update_schedule_with_retry, validate_role_arn,
-    validate_schedule_expression, ScheduleParams,
+    sanitize_schedule_name, update_schedule_with_retry, validate_role_arn,
+    validate_schedule_expression, CreateOutcome, ScheduleParams,
 };
 
 /// Options for the create_schedule operation.
