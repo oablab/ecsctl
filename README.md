@@ -346,3 +346,40 @@ Or build from source:
 ```bash
 cargo install --path .
 ```
+
+## Using as a Library
+
+`ecsctl` can be consumed as a Rust library crate. Disable default features to avoid pulling CLI dependencies:
+
+```toml
+[dependencies]
+ecsctl = { version = "0.9", default-features = false }
+```
+
+### Library-safe modules
+
+The following modules are safe for library consumption with injected `&Config`:
+
+- `ecsctl::config` — Config loading, alias/group resolution, scheduler config
+- `ecsctl::scale` — Immediate scaling operations
+- `ecsctl::restart` — Force new deployment
+- `ecsctl::export` — Export service to YAML
+- `ecsctl::logs` — CloudWatch log retrieval
+- `ecsctl::scheduler` — Schedule creation/listing/deletion (⚠️ `#[doc(hidden)]`, API not yet stable — pending structured returns in follow-up)
+
+### CLI-grade modules (not library-safe)
+
+These modules contain alias persistence that writes to the default config path (`~/.ecsctl/config.toml`):
+
+- `ecsctl::apply` — Creates services and auto-registers aliases
+- `ecsctl::delete` — Deletes services and removes aliases
+- `ecsctl::clone` — Clones via apply (inherits alias persistence)
+- `ecsctl::update` — Updates via apply (inherits alias persistence)
+
+### Custom config path
+
+```rust
+use ecsctl::config::Config;
+
+let cfg = Config::load_from(Path::new("~/.oabctl/config.toml"))?;
+```

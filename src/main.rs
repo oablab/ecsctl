@@ -251,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
                             role_arn: &resolved_role_arn,
                             explicit_name: schedule_name.as_deref(),
                             name_prefix: None,
+                            description_prefix: None,
                         },
                     )
                     .await

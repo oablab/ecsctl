@@ -18,7 +18,12 @@ pub struct CreateScheduleOpts<'a> {
     pub timezone: &'a str,
     pub role_arn: &'a str,
     pub explicit_name: Option<&'a str>,
+    /// Prefix for auto-generated schedule names (default: "ecsctl-scale-").
+    /// oabctl can pass "oabctl-scale-" to namespace its schedules.
     pub name_prefix: Option<&'a str>,
+    /// Prefix for schedule descriptions (default: "ecsctl").
+    /// Used in AWS console display: "{prefix}: scale {alias} to {count}".
+    pub description_prefix: Option<&'a str>,
 }
 
 /// Create EventBridge Scheduler schedules for a service or @group.
@@ -65,9 +70,10 @@ pub async fn create_schedule(
                 sanitize_schedule_name(alias, opts.count, prefix)
             }
         };
+        let desc_prefix = opts.description_prefix.unwrap_or("ecsctl");
         let description = format!(
-            "ecsctl: scale {} ({}/{}) to {}",
-            alias, cluster, service, opts.count
+            "{}: scale {} ({}/{}) to {}",
+            desc_prefix, alias, cluster, service, opts.count
         );
 
         let target_input = serde_json::json!({
