@@ -22,9 +22,9 @@ pub fn validate_role_arn(role_arn: &str) -> Result<()> {
     if prefix != "arn" {
         anyhow::bail!("invalid role ARN: must start with 'arn:', got '{role_arn}'");
     }
-    if !["aws", "aws-cn", "aws-us-gov"].contains(&partition) {
+    if !["aws", "aws-cn", "aws-us-gov", "aws-iso", "aws-iso-b"].contains(&partition) {
         anyhow::bail!(
-            "invalid role ARN: unrecognized partition '{partition}'. Expected aws, aws-cn, or aws-us-gov"
+            "invalid role ARN: unrecognized partition '{partition}'. Expected aws, aws-cn, aws-us-gov, aws-iso, or aws-iso-b"
         );
     }
     if service != "iam" {
@@ -550,6 +550,8 @@ mod tests {
         assert!(validate_role_arn("arn:aws:iam::123456789012:role/path/to/role").is_ok());
         assert!(validate_role_arn("arn:aws-cn:iam::123456789012:role/my-role").is_ok());
         assert!(validate_role_arn("arn:aws-us-gov:iam::123456789012:role/gov-role").is_ok());
+        assert!(validate_role_arn("arn:aws-iso:iam::123456789012:role/iso-role").is_ok());
+        assert!(validate_role_arn("arn:aws-iso-b:iam::123456789012:role/isob-role").is_ok());
     }
 
     #[test]

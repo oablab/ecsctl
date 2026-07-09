@@ -134,6 +134,12 @@ group_name = "my-schedules"   # optional, default: "ecsctl-schedules"
 
 The `role_arn` in config.toml is used when `--role-arn` is not provided on the command line.
 
+#### Limitations
+
+- **No Dead-Letter Queue (DLQ)** — if a scheduled scale action fails (e.g. IAM role deleted, service not found, API throttling), the failure is silent. Monitor the CloudWatch metric `ScheduleInvocationsFailed` in the `AWS/Scheduler` namespace to detect failures.
+- **Application Auto Scaling (AAS) conflict** — if your service has AAS policies with min/max capacity, EventBridge Scheduler's `UpdateService(DesiredCount)` may be immediately overridden by AAS restoring the count. In this case, use AAS Scheduled Actions instead (`aws application-autoscaling put-scheduled-action`), or ensure your AAS min capacity is also adjusted by a separate schedule.
+- **Schedule lifecycle is independent of aliases** — deleting an alias (`ecsctl alias rm`) does not remove associated schedules. Use `ecsctl schedule list` to identify and `ecsctl schedule delete` to clean up orphaned schedules.
+
 ### `ecsctl update` — update a service in-place
 
 ```bash

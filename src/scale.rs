@@ -23,19 +23,25 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: b
             .cluster(cluster)
             .service(service)
             .desired_count(count)
-            .force_new_deployment(true)
             .send()
             .await
             .context(format!("UpdateService failed for {alias}"))?;
         eprintln!("✓ {alias} → desired_count={count}");
     }
 
-    if wait && targets.len() == 1 {
-        let alias = &targets[0];
-        let (cluster, service) = cfg.resolve_alias(alias)?;
-        eprintln!("⏳ Waiting for service to stabilize...");
-        crate::apply::wait_for_stable(&ecs, cluster, service).await?;
-        eprintln!("✓ Service stable");
+    if wait {
+        if targets.len() == 1 {
+            let alias = &targets[0];
+            let (cluster, service) = cfg.resolve_alias(alias)?;
+            eprintln!("⏳ Waiting for service to stabilize...");
+            crate::apply::wait_for_stable(&ecs, cluster, service).await?;
+            eprintln!("✓ Service stable");
+        } else {
+            eprintln!(
+                "⚠️  --wait is only supported for single targets; skipping stabilization wait for group '{}'",
+                name
+            );
+        }
     }
 
     Ok(())

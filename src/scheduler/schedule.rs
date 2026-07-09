@@ -98,6 +98,9 @@ pub async fn create_schedule(
                 eprintln!("✓ Created: {schedule_name}");
             }
             CreateOutcome::AlreadyExists => {
+                eprintln!(
+                    "⚠️  Schedule '{schedule_name}' already exists — updating with new parameters"
+                );
                 update_schedule_with_retry(&scheduler, &params).await?;
                 eprintln!("✓ Updated: {schedule_name}");
             }
