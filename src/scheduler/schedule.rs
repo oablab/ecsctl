@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use futures::future::join_all;
+use futures_util::future::join_all;
 
 use crate::config::Config;
 
