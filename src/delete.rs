@@ -5,11 +5,12 @@ use crate::config::Config;
 
 pub async fn run(
     config: &aws_config::SdkConfig,
+    cfg: &Config,
     name: Option<&str>,
     file: Option<&str>,
 ) -> Result<()> {
     let (cluster, service, alias_name) = match (name, file) {
-        (Some(n), _) => resolve_from_alias(n)?,
+        (Some(n), _) => resolve_from_alias(cfg, n)?,
         (None, Some(f)) => resolve_from_file(f).await?,
         _ => anyhow::bail!("provide a name or -f <file>"),
     };
@@ -36,16 +37,15 @@ pub async fn run(
         .context("DeleteService failed")?;
 
     // Remove alias
-    let mut cfg = Config::load()?;
-    cfg.aliases.remove(&alias_name);
-    cfg.save()?;
+    let mut cfg_mut = Config::load()?;
+    cfg_mut.aliases.remove(&alias_name);
+    cfg_mut.save()?;
 
     eprintln!("✓ Deleted {cluster}/{service}");
     Ok(())
 }
 
-fn resolve_from_alias(name: &str) -> Result<(String, String, String)> {
-    let cfg = Config::load()?;
+fn resolve_from_alias(cfg: &Config, name: &str) -> Result<(String, String, String)> {
     let target = cfg
         .aliases
         .get(name)

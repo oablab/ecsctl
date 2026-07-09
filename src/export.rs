@@ -6,11 +6,11 @@ use crate::config::Config;
 
 pub async fn run(
     config: &aws_config::SdkConfig,
+    cfg: &Config,
     name: &str,
     output: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let cfg = Config::load()?;
     let target = cfg
         .aliases
         .get(name)
@@ -243,8 +243,11 @@ async fn build_spec(
 }
 
 /// Export a service to YAML string (used by clone).
-pub async fn export_to_yaml(config: &aws_config::SdkConfig, name: &str) -> Result<String> {
-    let cfg = Config::load()?;
+pub async fn export_to_yaml(
+    config: &aws_config::SdkConfig,
+    cfg: &Config,
+    name: &str,
+) -> Result<String> {
     let target = cfg
         .aliases
         .get(name)

@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use ecsctl::config::Config;
-use ecsctl::{alias, apply, clone, cp, delete, exec, export, logs, restart, scale, sync, update};
+use ecsctl::{
+    alias, apply, clone, cp, delete, exec, export, logs, restart, scale, scheduler, sync, update,
+};
 
 #[derive(Parser)]
 #[command(
@@ -73,7 +75,7 @@ enum Command {
         #[arg(long)]
         wait: bool,
     },
-    /// Scale a service or @group to a desired task count
+    /// Scale a service or @group to a desired task count (immediate)
     Scale {
         /// Alias or @group name
         name: String,
@@ -82,6 +84,11 @@ enum Command {
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
+    },
+    /// Manage scaling schedules (EventBridge Scheduler)
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
     },
     /// Update a service in-place (export + apply --set without intermediate file)
     Update {
@@ -163,6 +170,38 @@ enum AliasAction {
     Ls,
 }
 
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// Create a recurring schedule for scaling a service or @group
+    Create {
+        /// Alias or @group name
+        name: String,
+        /// Desired task count
+        count: i32,
+        /// Schedule expression: cron(...), rate(...), or at(...)
+        #[arg(long = "expression", alias = "expr")]
+        expression: String,
+        /// IANA timezone for schedule expression (default: UTC)
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+        /// IAM role ARN for EventBridge Scheduler execution (overrides config.toml)
+        #[arg(long)]
+        role_arn: Option<String>,
+        /// Explicit schedule name (overrides auto-generated name).
+        /// Use this to create multiple schedules for the same alias/count combination
+        /// (e.g. weekday vs weekend schedules).
+        #[arg(long = "schedule-name")]
+        schedule_name: Option<String>,
+    },
+    /// List all scaling schedules
+    List,
+    /// Delete a schedule by name
+    Delete {
+        /// Schedule name (from 'ecsctl schedule list')
+        name: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -179,15 +218,48 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Delete { name, file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            delete::run(&aws_config, name.as_deref(), file.as_deref()).await
+            delete::run(&aws_config, &cfg, name.as_deref(), file.as_deref()).await
         }
         Command::Restart { name, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run(&aws_config, &name, wait).await
+            restart::run(&aws_config, &cfg, &name, wait).await
         }
         Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            scale::run(&aws_config, &name, count, wait).await
+            scale::run(&aws_config, &cfg, &name, count, wait).await
+        }
+        Command::Schedule { action } => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            match action {
+                ScheduleAction::Create {
+                    name,
+                    count,
+                    expression,
+                    timezone,
+                    role_arn,
+                    schedule_name,
+                } => {
+                    let resolved_role_arn = cfg.resolve_scheduler_role_arn(role_arn)?;
+                    scheduler::create_schedule(&aws_config, &cfg, &{
+                        let mut opts = scheduler::CreateScheduleOpts::new(
+                            &name,
+                            count,
+                            &expression,
+                            &timezone,
+                            &resolved_role_arn,
+                        );
+                        if let Some(ref sn) = schedule_name {
+                            opts = opts.with_explicit_name(sn);
+                        }
+                        opts
+                    })
+                    .await
+                }
+                ScheduleAction::List => scheduler::list_schedules(&aws_config, &cfg).await,
+                ScheduleAction::Delete { name } => {
+                    scheduler::delete_schedule(&aws_config, &cfg, &name).await
+                }
+            }
         }
         Command::Update {
             name,
@@ -195,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
             wait,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            update::run(&aws_config, &name, &overrides, wait).await
+            update::run(&aws_config, &cfg, &name, &overrides, wait).await
         }
         Command::Clone {
             source,
@@ -203,11 +275,11 @@ async fn main() -> anyhow::Result<()> {
             overrides,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            clone::run(&aws_config, &source, &target, &overrides).await
+            clone::run(&aws_config, &cfg, &source, &target, &overrides).await
         }
         Command::Export { name, output, json } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            export::run(&aws_config, &name, output.as_deref(), json).await
+            export::run(&aws_config, &cfg, &name, output.as_deref(), json).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,
@@ -241,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
             follow,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            logs::run(&aws_config, &name, lines, follow).await
+            logs::run(&aws_config, &cfg, &name, lines, follow).await
         }
         Command::Exec { target, command } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
