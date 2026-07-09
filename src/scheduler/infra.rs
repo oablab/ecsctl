@@ -224,33 +224,6 @@ pub fn sanitize_explicit_name(raw: &str) -> String {
     }
 }
 
-/// Check if a schedule already exists.
-pub async fn schedule_exists(
-    scheduler: &aws_sdk_scheduler::Client,
-    name: &str,
-    group_name: &str,
-) -> Result<bool> {
-    match scheduler
-        .get_schedule()
-        .name(name)
-        .group_name(group_name)
-        .send()
-        .await
-    {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            if e.as_service_error()
-                .map(|se| se.is_resource_not_found_exception())
-                .unwrap_or(false)
-            {
-                Ok(false)
-            } else {
-                Err(e).context("failed to check schedule existence")
-            }
-        }
-    }
-}
-
 /// Parameters for creating or updating a schedule.
 pub(crate) struct ScheduleParams<'a> {
     pub(crate) schedule_name: &'a str,
