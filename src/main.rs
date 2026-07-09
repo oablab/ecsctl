@@ -275,11 +275,11 @@ async fn main() -> anyhow::Result<()> {
             overrides,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            clone::run(&aws_config, &source, &target, &overrides).await
+            clone::run(&aws_config, &cfg, &source, &target, &overrides).await
         }
         Command::Export { name, output, json } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            export::run(&aws_config, &name, output.as_deref(), json).await
+            export::run(&aws_config, &cfg, &name, output.as_deref(), json).await
         }
         Command::Alias { action } => match action {
             AliasAction::Set { target, name } => alias::set(&name, &target).await,

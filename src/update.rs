@@ -29,7 +29,7 @@ pub async fn run(
     check_no_sidecars(config, cfg, name).await?;
 
     eprintln!("📥 Exporting current state of '{name}'...");
-    let yaml = crate::export::export_to_yaml(config, name).await?;
+    let yaml = crate::export::export_to_yaml(config, cfg, name).await?;
     crate::apply::run_from_string(config, &yaml, overrides, wait).await
 }
 
