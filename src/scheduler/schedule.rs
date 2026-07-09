@@ -26,6 +26,46 @@ pub struct CreateScheduleOpts<'a> {
     pub description_prefix: Option<&'a str>,
 }
 
+impl<'a> CreateScheduleOpts<'a> {
+    /// Create a new options struct with required fields. Optional fields default to None.
+    pub fn new(
+        name: &'a str,
+        count: i32,
+        schedule_expression: &'a str,
+        timezone: &'a str,
+        role_arn: &'a str,
+    ) -> Self {
+        Self {
+            name,
+            count,
+            schedule_expression,
+            timezone,
+            role_arn,
+            explicit_name: None,
+            name_prefix: None,
+            description_prefix: None,
+        }
+    }
+
+    /// Set an explicit schedule name (overrides auto-generated name).
+    pub fn with_explicit_name(mut self, name: &'a str) -> Self {
+        self.explicit_name = Some(name);
+        self
+    }
+
+    /// Set a custom name prefix for auto-generated schedule names.
+    pub fn with_name_prefix(mut self, prefix: &'a str) -> Self {
+        self.name_prefix = Some(prefix);
+        self
+    }
+
+    /// Set a custom description prefix for schedule descriptions.
+    pub fn with_description_prefix(mut self, prefix: &'a str) -> Self {
+        self.description_prefix = Some(prefix);
+        self
+    }
+}
+
 /// Create EventBridge Scheduler schedules for a service or @group.
 ///
 /// Requires a user-provided `role_arn` — does NOT auto-create IAM roles.

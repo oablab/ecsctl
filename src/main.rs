@@ -240,20 +240,19 @@ async fn main() -> anyhow::Result<()> {
                     schedule_name,
                 } => {
                     let resolved_role_arn = cfg.resolve_scheduler_role_arn(role_arn)?;
-                    scheduler::create_schedule(
-                        &aws_config,
-                        &cfg,
-                        &scheduler::CreateScheduleOpts {
-                            name: &name,
+                    scheduler::create_schedule(&aws_config, &cfg, &{
+                        let mut opts = scheduler::CreateScheduleOpts::new(
+                            &name,
                             count,
-                            schedule_expression: &expression,
-                            timezone: &timezone,
-                            role_arn: &resolved_role_arn,
-                            explicit_name: schedule_name.as_deref(),
-                            name_prefix: None,
-                            description_prefix: None,
-                        },
-                    )
+                            &expression,
+                            &timezone,
+                            &resolved_role_arn,
+                        );
+                        if let Some(ref sn) = schedule_name {
+                            opts = opts.with_explicit_name(sn);
+                        }
+                        opts
+                    })
                     .await
                 }
                 ScheduleAction::List => scheduler::list_schedules(&aws_config, &cfg).await,
