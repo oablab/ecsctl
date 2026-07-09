@@ -119,9 +119,10 @@ Manages recurring ECS scaling schedules via [EventBridge Scheduler](https://docs
 
 | Flag | Description |
 |------|-------------|
-| `--expr` | Schedule expression: `cron(...)`, `rate(...)`, or `at(...)` |
-| `--timezone` | IANA timezone (default: UTC) |
-| `--role-arn` | IAM role ARN for Scheduler execution (overrides config.toml) |
+| `--expression` (alias: `--expr`) | Schedule expression: `cron(...)`, `rate(...)`, or `at(...)` |
+| `--timezone` | IANA timezone for schedule evaluation (default: `UTC`) |
+| `--role-arn` | IAM role ARN for Scheduler execution (**required** — via flag or `[scheduler].role_arn` in config.toml) |
+| `--schedule-name` | Explicit schedule name (overrides auto-generated name). Use for multiple schedules on the same alias/count, e.g. weekday vs weekend. |
 
 **Config support:**
 
