@@ -10,6 +10,7 @@ use super::infra::{
 };
 
 /// Options for the create_schedule operation.
+#[non_exhaustive]
 pub struct CreateScheduleOpts<'a> {
     pub name: &'a str,
     pub count: i32,
@@ -17,6 +18,7 @@ pub struct CreateScheduleOpts<'a> {
     pub timezone: &'a str,
     pub role_arn: &'a str,
     pub explicit_name: Option<&'a str>,
+    pub name_prefix: Option<&'a str>,
 }
 
 /// Create EventBridge Scheduler schedules for a service or @group.
@@ -58,7 +60,10 @@ pub async fn create_schedule(
                 // collision resistance on truncation.
                 sanitize_explicit_name(&raw)
             }
-            None => sanitize_schedule_name(alias, opts.count),
+            None => {
+                let prefix = opts.name_prefix.unwrap_or("ecsctl-scale-");
+                sanitize_schedule_name(alias, opts.count, prefix)
+            }
         };
         let description = format!(
             "ecsctl: scale {} ({}/{}) to {}",

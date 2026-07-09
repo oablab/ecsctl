@@ -218,15 +218,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Delete { name, file } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            delete::run(&aws_config, name.as_deref(), file.as_deref()).await
+            delete::run(&aws_config, &cfg, name.as_deref(), file.as_deref()).await
         }
         Command::Restart { name, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run(&aws_config, &name, wait).await
+            restart::run(&aws_config, &cfg, &name, wait).await
         }
         Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            scale::run(&aws_config, &name, count, wait).await
+            scale::run(&aws_config, &cfg, &name, count, wait).await
         }
         Command::Schedule { action } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -250,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
                             timezone: &timezone,
                             role_arn: &resolved_role_arn,
                             explicit_name: schedule_name.as_deref(),
+                            name_prefix: None,
                         },
                     )
                     .await
@@ -266,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
             wait,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            update::run(&aws_config, &name, &overrides, wait).await
+            update::run(&aws_config, &cfg, &name, &overrides, wait).await
         }
         Command::Clone {
             source,
@@ -312,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
             follow,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            logs::run(&aws_config, &name, lines, follow).await
+            logs::run(&aws_config, &cfg, &name, lines, follow).await
         }
         Command::Exec { target, command } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;

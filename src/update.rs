@@ -18,6 +18,7 @@ fn validate_overrides(overrides: &[String]) -> Result<()> {
 
 pub async fn run(
     config: &aws_config::SdkConfig,
+    cfg: &Config,
     name: &str,
     overrides: &[String],
     wait: bool,
@@ -25,15 +26,14 @@ pub async fn run(
     validate_overrides(overrides)?;
 
     // Guard: abort if service has sidecar containers that would be silently dropped
-    check_no_sidecars(config, name).await?;
+    check_no_sidecars(config, cfg, name).await?;
 
     eprintln!("📥 Exporting current state of '{name}'...");
     let yaml = crate::export::export_to_yaml(config, name).await?;
     crate::apply::run_from_string(config, &yaml, overrides, wait).await
 }
 
-async fn check_no_sidecars(config: &aws_config::SdkConfig, name: &str) -> Result<()> {
-    let cfg = Config::load()?;
+async fn check_no_sidecars(config: &aws_config::SdkConfig, cfg: &Config, name: &str) -> Result<()> {
     let target = cfg
         .aliases
         .get(name)

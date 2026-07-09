@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 /// ~/.ecsctl/config.toml
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Config {
     /// S3 bucket for staging file transfers
     pub bucket: Option<String>,
@@ -24,6 +25,7 @@ pub struct Config {
 
 /// [scheduler] section in config.toml
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SchedulerConfig {
     /// IAM role ARN for EventBridge Scheduler execution
     pub role_arn: Option<String>,
@@ -40,9 +42,16 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        let path = Self::path();
+        Self::load_from(&Self::path())
+    }
+
+    /// Load config from a custom path. Returns default config if file doesn't exist.
+    ///
+    /// Use this when consuming ecsctl as a library with a different config location
+    /// (e.g. `~/.oabctl/config.toml`).
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
         if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
+            let content = std::fs::read_to_string(path)?;
             Ok(toml::from_str(&content)?)
         } else {
             Ok(Self::default())

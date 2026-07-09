@@ -3,12 +3,17 @@ use aws_sdk_ecs::Client as EcsClient;
 
 use crate::config::Config;
 
-pub async fn run(config: &aws_config::SdkConfig, name: &str, count: i32, wait: bool) -> Result<()> {
+pub async fn run(
+    config: &aws_config::SdkConfig,
+    cfg: &Config,
+    name: &str,
+    count: i32,
+    wait: bool,
+) -> Result<()> {
     if count < 0 {
         anyhow::bail!("count must be >= 0, got {count}");
     }
 
-    let cfg = Config::load()?;
     let targets = cfg.resolve_targets(name);
 
     if targets.is_empty() {

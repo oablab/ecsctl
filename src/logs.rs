@@ -7,11 +7,11 @@ use crate::container::find_main_container;
 
 pub async fn run(
     config: &aws_config::SdkConfig,
+    cfg: &Config,
     name: &str,
     lines: i32,
     follow: bool,
 ) -> Result<()> {
-    let cfg = Config::load()?;
     let target = cfg
         .aliases
         .get(name)

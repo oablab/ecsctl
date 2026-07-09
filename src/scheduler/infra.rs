@@ -145,18 +145,17 @@ pub fn validate_schedule_expression(expr: &str) -> Result<()> {
 
 /// Sanitize an alias name for use in a schedule name.
 ///
-/// Produces deterministic names in the form: `ecsctl-scale-{safe_alias}-to-{count}`.
+/// Produces deterministic names in the form: `{prefix}{safe_alias}-to-{count}`.
 /// Appends a short hash suffix when:
 /// - The alias was normalized (contains characters replaced by '-'), to prevent
 ///   collisions between aliases like `web/api` and `web-api`.
 /// - The name exceeds the 64-char limit and must be truncated.
-pub fn sanitize_schedule_name(alias: &str, count: i32) -> String {
+pub fn sanitize_schedule_name(alias: &str, count: i32, prefix: &str) -> String {
     let safe_alias = alias.replace(
         |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
         "-",
     );
     let suffix = format!("-to-{}", count);
-    let prefix = "ecsctl-scale-";
 
     let needs_hash = safe_alias != alias;
     let max_alias_len = 64 - prefix.len() - suffix.len();
@@ -450,29 +449,29 @@ mod tests {
 
     #[test]
     fn test_sanitize_normal_name() {
-        let name = sanitize_schedule_name("chaodu", 0);
+        let name = sanitize_schedule_name("chaodu", 0, "ecsctl-scale-");
         assert_eq!(name, "ecsctl-scale-chaodu-to-0");
 
-        let name = sanitize_schedule_name("my-bot", 1);
+        let name = sanitize_schedule_name("my-bot", 1, "ecsctl-scale-");
         assert_eq!(name, "ecsctl-scale-my-bot-to-1");
     }
 
     #[test]
     fn test_sanitize_special_characters() {
-        let name = sanitize_schedule_name("bot@special!name", 2);
+        let name = sanitize_schedule_name("bot@special!name", 2, "ecsctl-scale-");
         // Contains normalized chars → hash appended
         assert!(name.starts_with("ecsctl-scale-bot-special-name-"));
         assert!(name.ends_with("-to-2"));
         assert!(name.len() <= 64);
         // Different aliases that normalize the same should NOT collide
-        let name2 = sanitize_schedule_name("bot-special-name", 2);
+        let name2 = sanitize_schedule_name("bot-special-name", 2, "ecsctl-scale-");
         assert_ne!(name, name2, "normalized aliases should not collide");
     }
 
     #[test]
     fn test_sanitize_long_name_truncated_with_hash() {
         let long_alias = "a".repeat(100);
-        let name = sanitize_schedule_name(&long_alias, 0);
+        let name = sanitize_schedule_name(&long_alias, 0, "ecsctl-scale-");
         // Must fit in 64 chars
         assert!(name.len() <= 64, "name too long: {} chars", name.len());
         // Must contain standard prefix/suffix
@@ -486,8 +485,8 @@ mod tests {
         // should produce different schedule names due to hash suffix
         let alias1 = format!("{}{}", "a".repeat(50), "xxx");
         let alias2 = format!("{}{}", "a".repeat(50), "yyy");
-        let name1 = sanitize_schedule_name(&alias1, 0);
-        let name2 = sanitize_schedule_name(&alias2, 0);
+        let name1 = sanitize_schedule_name(&alias1, 0, "ecsctl-scale-");
+        let name2 = sanitize_schedule_name(&alias2, 0, "ecsctl-scale-");
         assert_ne!(
             name1, name2,
             "truncated aliases should not collide: {name1} vs {name2}"
@@ -496,8 +495,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_deterministic() {
-        let name1 = sanitize_schedule_name("test-alias", 5);
-        let name2 = sanitize_schedule_name("test-alias", 5);
+        let name1 = sanitize_schedule_name("test-alias", 5, "ecsctl-scale-");
+        let name2 = sanitize_schedule_name("test-alias", 5, "ecsctl-scale-");
         assert_eq!(name1, name2);
     }
 
@@ -509,8 +508,8 @@ mod tests {
         // Short aliases (no truncation, but normalization triggers hash)
         let short1 = "web/api"; // '/' → '-'
         let short2 = "web-api"; // already '-'
-        let name1 = sanitize_schedule_name(short1, 0);
-        let name2 = sanitize_schedule_name(short2, 0);
+        let name1 = sanitize_schedule_name(short1, 0, "ecsctl-scale-");
+        let name2 = sanitize_schedule_name(short2, 0, "ecsctl-scale-");
         assert_ne!(
             name1, name2,
             "short aliases differing only in normalized chars should not collide"
@@ -523,8 +522,8 @@ mod tests {
         // Long aliases (truncation + hash)
         let long1 = "a/b".repeat(30); // contains '/' → '-'
         let long2 = "a-b".repeat(30); // already '-'
-        let name1 = sanitize_schedule_name(&long1, 0);
-        let name2 = sanitize_schedule_name(&long2, 0);
+        let name1 = sanitize_schedule_name(&long1, 0, "ecsctl-scale-");
+        let name2 = sanitize_schedule_name(&long2, 0, "ecsctl-scale-");
         assert!(name1.len() <= 64);
         assert!(name2.len() <= 64);
         assert_ne!(
@@ -536,7 +535,7 @@ mod tests {
     #[test]
     fn test_sanitize_short_names_no_hash() {
         // Short names should be used as-is without hash suffix
-        let name = sanitize_schedule_name("web", 0);
+        let name = sanitize_schedule_name("web", 0, "ecsctl-scale-");
         assert_eq!(name, "ecsctl-scale-web-to-0");
         // No hash pattern in short names
         assert!(!name.contains("-0") || name == "ecsctl-scale-web-to-0");

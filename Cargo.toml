@@ -12,10 +12,15 @@ path = "src/lib.rs"
 [[bin]]
 name = "ecsctl"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["full"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-ecs = "1"
