@@ -78,6 +78,22 @@ impl Config {
         self.scheduler.as_ref().and_then(|s| s.role_arn.as_deref())
     }
 
+    /// Resolve the scheduler role ARN from flag override or config.
+    ///
+    /// Priority: flag value > config.toml `[scheduler].role_arn` > error.
+    /// This keeps the resolution logic testable outside the CLI layer.
+    pub fn resolve_scheduler_role_arn(&self, flag_value: Option<String>) -> anyhow::Result<String> {
+        flag_value
+            .or_else(|| self.scheduler_role_arn().map(|s| s.to_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "scheduler role ARN required.\n\
+                     Provide --role-arn or set [scheduler].role_arn in ~/.ecsctl/config.toml\n\n\
+                     Example config:\n  [scheduler]\n  role_arn = \"arn:aws:iam::123456789012:role/ecsctl-scheduler-role\""
+                )
+            })
+    }
+
     /// Get the scheduler group name from config, or default to "ecsctl-schedules".
     pub fn scheduler_group_name(&self) -> &str {
         self.scheduler

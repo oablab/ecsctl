@@ -4,17 +4,10 @@ use futures::future::join_all;
 use crate::config::Config;
 
 use super::infra::{
-    create_schedule_with_retry, ensure_schedule_group, sanitize_schedule_name,
-    update_schedule_with_retry, validate_role_arn, validate_schedule_expression, ScheduleParams,
+    create_schedule_with_retry, ensure_schedule_group, sanitize_explicit_name,
+    sanitize_schedule_name, CreateOutcome, update_schedule_with_retry, validate_role_arn,
+    validate_schedule_expression, ScheduleParams,
 };
-
-/// Check if an anyhow error chain contains a ConflictException (schedule already exists).
-fn is_conflict_error(e: &anyhow::Error) -> bool {
-    // The error is wrapped by .context() in schedule_op_with_retry, so we walk
-    // the chain looking for the ConflictException indicator in the error message.
-    let msg = format!("{:#}", e);
-    msg.contains("ConflictException")
-}
 
 /// Options for the create_schedule operation.
 pub struct CreateScheduleOpts<'a> {
@@ -60,16 +53,10 @@ pub async fn create_schedule(
                 } else {
                     format!("{}-{}", n, alias)
                 };
-                // Sanitize and enforce 64-char limit for explicit names
-                let sanitized = raw.replace(
-                    |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
-                    "-",
-                );
-                if sanitized.len() > 64 {
-                    sanitized[..64].to_string()
-                } else {
-                    sanitized
-                }
+                // Sanitize and enforce 64-char limit for explicit names.
+                // Uses same hash strategy as auto-generated names for
+                // collision resistance on truncation.
+                sanitize_explicit_name(&raw)
             }
             None => sanitize_schedule_name(alias, opts.count),
         };
@@ -104,17 +91,16 @@ pub async fn create_schedule(
             description: &description,
         };
 
-        // Optimistic create — if it conflicts (already exists), fall back to update.
-        // This avoids the TOCTOU race in check-then-act patterns.
-        match create_schedule_with_retry(&scheduler, &params).await {
-            Ok(()) => {
+        // Optimistic create — if schedule already exists, fall back to update.
+        // ConflictException is handled via typed SDK error (no string matching).
+        match create_schedule_with_retry(&scheduler, &params).await? {
+            CreateOutcome::Created => {
                 eprintln!("✓ Created: {schedule_name}");
             }
-            Err(e) if is_conflict_error(&e) => {
+            CreateOutcome::AlreadyExists => {
                 update_schedule_with_retry(&scheduler, &params).await?;
                 eprintln!("✓ Updated: {schedule_name}");
             }
-            Err(e) => return Err(e),
         }
 
         eprintln!(

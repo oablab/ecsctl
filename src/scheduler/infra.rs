@@ -190,6 +190,40 @@ fn simple_hash(s: &str) -> u64 {
     hash
 }
 
+/// Sanitize an explicit schedule name (from `--schedule-name`).
+///
+/// Applies the same collision-resistant strategy as `sanitize_schedule_name`:
+/// appends a FNV-1a hash suffix when normalization changes the name or
+/// truncation is needed.
+pub fn sanitize_explicit_name(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let needs_hash = sanitized != raw;
+
+    if !needs_hash && sanitized.len() <= 64 {
+        sanitized
+    } else {
+        let hash = simple_hash(raw);
+        let hash_suffix = format!("-{:06x}", hash & 0xFFFFFF);
+        let available = 64 - hash_suffix.len();
+        let base = if sanitized.len() <= available {
+            &sanitized[..]
+        } else {
+            &sanitized[..available]
+        };
+        format!("{}{}", base, hash_suffix)
+    }
+}
+
 /// Check if a schedule already exists.
 pub async fn schedule_exists(
     scheduler: &aws_sdk_scheduler::Client,
@@ -228,13 +262,28 @@ pub(crate) struct ScheduleParams<'a> {
     pub(crate) description: &'a str,
 }
 
+/// Outcome of a schedule creation attempt.
+pub enum CreateOutcome {
+    /// Schedule was created successfully.
+    Created,
+    /// Schedule already exists (ConflictException).
+    AlreadyExists,
+}
+
 /// Create a schedule with retry + exponential backoff to handle IAM propagation delay.
+///
+/// Returns `Ok(CreateOutcome::AlreadyExists)` if the schedule already exists
+/// (ConflictException), allowing the caller to fall back to update without
+/// relying on fragile string matching.
 pub async fn create_schedule_with_retry(
     scheduler: &aws_sdk_scheduler::Client,
     params: &ScheduleParams<'_>,
-) -> Result<()> {
-    schedule_op_with_retry("create", || async {
-        scheduler
+) -> Result<CreateOutcome> {
+    let max_attempts = 4;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match scheduler
             .create_schedule()
             .name(params.schedule_name)
             .group_name(params.group_name)
@@ -245,9 +294,31 @@ pub async fn create_schedule_with_retry(
             .description(params.description)
             .send()
             .await
-            .map(|_| ())
-    })
-    .await
+        {
+            Ok(_) => return Ok(CreateOutcome::Created),
+            Err(e) => {
+                // ConflictException means schedule already exists — not an error
+                if e.as_service_error()
+                    .map(|se| se.is_conflict_exception())
+                    .unwrap_or(false)
+                {
+                    return Ok(CreateOutcome::AlreadyExists);
+                }
+                if is_retryable_scheduler_error(&e) && attempt < max_attempts {
+                    let delay = std::time::Duration::from_secs(5 * attempt as u64);
+                    eprintln!(
+                        "  ⏳ Retryable error, retrying in {}s (attempt {}/{})",
+                        delay.as_secs(),
+                        attempt,
+                        max_attempts
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    return Err(e).context("failed to create schedule");
+                }
+            }
+        }
+    }
 }
 
 /// Update a schedule with retry + exponential backoff to handle IAM propagation delay.

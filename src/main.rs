@@ -239,16 +239,7 @@ async fn main() -> anyhow::Result<()> {
                     role_arn,
                     schedule_name,
                 } => {
-                    // Resolve role ARN: --role-arn flag > config.toml > error
-                    let resolved_role_arn = role_arn
-                        .or_else(|| cfg.scheduler_role_arn().map(|s| s.to_string()))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "scheduler role ARN required.\n\
-                                 Provide --role-arn or set [scheduler].role_arn in ~/.ecsctl/config.toml\n\n\
-                                 Example config:\n  [scheduler]\n  role_arn = \"arn:aws:iam::123456789012:role/ecsctl-scheduler-role\""
-                            )
-                        })?;
+                    let resolved_role_arn = cfg.resolve_scheduler_role_arn(role_arn)?;
                     scheduler::create_schedule(
                         &aws_config,
                         &cfg,
