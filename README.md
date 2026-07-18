@@ -109,11 +109,22 @@ Constraints and behavior:
 - **Interruption**: Ctrl-C during the wait restores the configuration before
   exiting. A hard kill (SIGKILL/crash) cannot run cleanup — the recovery
   snapshot (`minimumHealthyPercent`/`maximumPercent`/AZ-rebalancing values) is
-  printed before mutation; restore manually with
-  `aws ecs update-service --deployment-configuration ...` using those values.
-  A leftover `min=0/max=100` is benign: future deploys also stop-first.
+  printed before mutation. Until restored, future deploys also stop-first.
 - **Permissions**: needs `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`,
   and `ecs:UpdateService` in addition to the rolling-restart permissions.
+
+If automatic restoration fails, first read the full current configuration (all
+unrelated fields were preserved), then replace only its min/max values from the
+printed snapshot and submit the complete JSON. Reapply the service's normal IaC
+and verify with `aws ecs describe-services` afterward:
+
+```bash
+aws ecs describe-services --cluster <cluster> --services <service> \
+  --query 'services[0].deploymentConfiguration' --output json
+aws ecs update-service --cluster <cluster> --service <service> \
+  --deployment-configuration '<full JSON above with the saved min/max>' \
+  --availability-zone-rebalancing ENABLED  # include only if the snapshot said ENABLED
+```
 
 ### `ecsctl scale` — scale a service or group
 

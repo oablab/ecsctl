@@ -11,6 +11,24 @@ use crate::config::Config;
 /// fail instead of retaining the temporary stop-first policy indefinitely.
 const RECREATE_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// Copy the complete deployment configuration while overriding only the two
+/// percentages that implement stop-first replacement.
+fn recreate_deployment_configuration(saved: &DeploymentConfiguration) -> DeploymentConfiguration {
+    DeploymentConfiguration::builder()
+        .set_deployment_circuit_breaker(saved.deployment_circuit_breaker().cloned())
+        .minimum_healthy_percent(0)
+        .maximum_percent(100)
+        .set_alarms(saved.alarms().cloned())
+        .set_strategy(saved.strategy().cloned())
+        .set_bake_time_in_minutes(saved.bake_time_in_minutes())
+        .set_lifecycle_hooks(
+            (!saved.lifecycle_hooks().is_empty()).then(|| saved.lifecycle_hooks().to_vec()),
+        )
+        .set_linear_configuration(saved.linear_configuration().cloned())
+        .set_canary_configuration(saved.canary_configuration().cloned())
+        .build()
+}
+
 /// Options for [`run_with`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RestartOptions {
@@ -163,17 +181,8 @@ async fn recreate_service(
         }
     }
 
-    // Build the recreate configuration, preserving unrelated fields
-    // (circuit breaker, alarms) from the saved configuration.
-    let mut builder = DeploymentConfiguration::builder()
-        .minimum_healthy_percent(0)
-        .maximum_percent(100);
-    if let Some(cb) = saved.deployment_circuit_breaker() {
-        builder = builder.deployment_circuit_breaker(cb.clone());
-    }
-    if let Some(alarms) = saved.alarms() {
-        builder = builder.alarms(alarms.clone());
-    }
+    // Preserve every deploymentConfiguration field and change only min/max.
+    let recreate_config = recreate_deployment_configuration(&saved);
 
     // Print the recovery snapshot BEFORE mutating: if this process is killed
     // (SIGKILL, crash) after the update, no in-process cleanup can run — the
@@ -191,7 +200,7 @@ async fn recreate_service(
         .cluster(cluster)
         .service(service)
         .force_new_deployment(true)
-        .deployment_configuration(builder.build());
+        .deployment_configuration(recreate_config);
     if az_enabled {
         update = update.availability_zone_rebalancing(
             aws_sdk_ecs::types::AvailabilityZoneRebalancing::Disabled,
@@ -353,10 +362,55 @@ async fn restore_with_retry(
     ))
 }
 
-/// Read the service back and compare the restored fields against the
-/// snapshot. Compares min/max percentages, circuit-breaker settings, and the
-/// AZ-rebalancing flag; a mismatch indicates the restore did not converge
-/// (or a concurrent update diverged the service).
+/// Compare every deployment configuration field, using whole-object equality
+/// as a future-safe guard if the SDK adds fields after this code is written.
+fn validate_restored_configuration(
+    current: &DeploymentConfiguration,
+    saved: &DeploymentConfiguration,
+) -> Result<()> {
+    if current == saved {
+        return Ok(());
+    }
+
+    let mut fields = Vec::new();
+    if current.deployment_circuit_breaker() != saved.deployment_circuit_breaker() {
+        fields.push("deploymentCircuitBreaker");
+    }
+    if current.minimum_healthy_percent() != saved.minimum_healthy_percent() {
+        fields.push("minimumHealthyPercent");
+    }
+    if current.maximum_percent() != saved.maximum_percent() {
+        fields.push("maximumPercent");
+    }
+    if current.alarms() != saved.alarms() {
+        fields.push("alarms");
+    }
+    if current.strategy() != saved.strategy() {
+        fields.push("strategy");
+    }
+    if current.bake_time_in_minutes() != saved.bake_time_in_minutes() {
+        fields.push("bakeTimeInMinutes");
+    }
+    if current.lifecycle_hooks() != saved.lifecycle_hooks() {
+        fields.push("lifecycleHooks");
+    }
+    if current.linear_configuration() != saved.linear_configuration() {
+        fields.push("linearConfiguration");
+    }
+    if current.canary_configuration() != saved.canary_configuration() {
+        fields.push("canaryConfiguration");
+    }
+    if fields.is_empty() {
+        fields.push("unknown/new SDK fields");
+    }
+    anyhow::bail!(
+        "restored deployment configuration diverges from the snapshot: {} (concurrent update?)",
+        fields.join(", ")
+    );
+}
+
+/// Read the service back and compare the complete deployment configuration
+/// and AZ-rebalancing flag against the pre-mutation snapshot.
 async fn verify_restored(
     ecs: &EcsClient,
     cluster: &str,
@@ -376,20 +430,7 @@ async fn verify_restored(
         .deployment_configuration()
         .context("service has no deploymentConfiguration after restore")?;
 
-    if current.minimum_healthy_percent() != saved.minimum_healthy_percent()
-        || current.maximum_percent() != saved.maximum_percent()
-    {
-        anyhow::bail!(
-            "restored deployment configuration diverges: min/max are {:?}/{:?}, expected {:?}/{:?} (concurrent update?)",
-            current.minimum_healthy_percent(),
-            current.maximum_percent(),
-            saved.minimum_healthy_percent(),
-            saved.maximum_percent(),
-        );
-    }
-    if current.deployment_circuit_breaker() != saved.deployment_circuit_breaker() {
-        anyhow::bail!("restored circuit-breaker settings diverge from the snapshot");
-    }
+    validate_restored_configuration(current, saved)?;
     let current_az_enabled = matches!(
         svc.availability_zone_rebalancing(),
         Some(aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled)
@@ -467,9 +508,32 @@ fn preflight(
 mod tests {
     use super::*;
     use aws_sdk_ecs::types::{
-        AvailabilityZoneRebalancing, DeploymentController, DeploymentControllerType,
-        DeploymentStrategy, SchedulingStrategy, Service,
+        AvailabilityZoneRebalancing, CanaryConfiguration, DeploymentController,
+        DeploymentControllerType, DeploymentLifecycleHook, DeploymentStrategy, LinearConfiguration,
+        SchedulingStrategy, Service,
     };
+
+    fn saved_configuration() -> DeploymentConfiguration {
+        DeploymentConfiguration::builder()
+            .minimum_healthy_percent(75)
+            .maximum_percent(150)
+            .strategy(DeploymentStrategy::Rolling)
+            .bake_time_in_minutes(7)
+            .lifecycle_hooks(DeploymentLifecycleHook::builder().build())
+            .linear_configuration(
+                LinearConfiguration::builder()
+                    .step_percent(10.0)
+                    .step_bake_time_in_minutes(3)
+                    .build(),
+            )
+            .canary_configuration(
+                CanaryConfiguration::builder()
+                    .canary_percent(5.0)
+                    .canary_bake_time_in_minutes(4)
+                    .build(),
+            )
+            .build()
+    }
 
     fn base_service() -> Service {
         Service::builder()
@@ -569,5 +633,51 @@ mod tests {
             .build();
         let err = preflight("t", &svc).unwrap_err().to_string();
         assert!(err.contains("ROLLING"), "got: {err}");
+    }
+
+    #[test]
+    fn recreate_configuration_changes_only_percentages() {
+        let saved = saved_configuration();
+        let recreate = recreate_deployment_configuration(&saved);
+
+        assert_eq!(recreate.minimum_healthy_percent(), Some(0));
+        assert_eq!(recreate.maximum_percent(), Some(100));
+        assert_eq!(
+            recreate.deployment_circuit_breaker(),
+            saved.deployment_circuit_breaker()
+        );
+        assert_eq!(recreate.alarms(), saved.alarms());
+        assert_eq!(recreate.strategy(), saved.strategy());
+        assert_eq!(
+            recreate.bake_time_in_minutes(),
+            saved.bake_time_in_minutes()
+        );
+        assert_eq!(recreate.lifecycle_hooks(), saved.lifecycle_hooks());
+        assert_eq!(
+            recreate.linear_configuration(),
+            saved.linear_configuration()
+        );
+        assert_eq!(
+            recreate.canary_configuration(),
+            saved.canary_configuration()
+        );
+    }
+
+    #[test]
+    fn restore_validation_checks_complete_configuration() {
+        let saved = saved_configuration();
+        let current = DeploymentConfiguration::builder()
+            .minimum_healthy_percent(75)
+            .maximum_percent(150)
+            .strategy(DeploymentStrategy::Rolling)
+            .bake_time_in_minutes(8)
+            .set_lifecycle_hooks(Some(saved.lifecycle_hooks().to_vec()))
+            .set_linear_configuration(saved.linear_configuration().cloned())
+            .set_canary_configuration(saved.canary_configuration().cloned())
+            .build();
+
+        let error = validate_restored_configuration(&current, &saved).unwrap_err();
+        assert!(error.to_string().contains("bakeTimeInMinutes"));
+        assert!(validate_restored_configuration(&saved, &saved).is_ok());
     }
 }
