@@ -12,21 +12,43 @@ use crate::config::Config;
 const RECREATE_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Copy the complete deployment configuration while overriding only the two
-/// percentages that implement stop-first replacement.
+/// percentages that implement stop-first replacement. Cloning (rather than
+/// enumerating fields on a builder) keeps fields added by future SDK
+/// versions intact — `DeploymentConfiguration` is `#[non_exhaustive]` with
+/// public fields.
 fn recreate_deployment_configuration(saved: &DeploymentConfiguration) -> DeploymentConfiguration {
-    DeploymentConfiguration::builder()
-        .set_deployment_circuit_breaker(saved.deployment_circuit_breaker().cloned())
-        .minimum_healthy_percent(0)
-        .maximum_percent(100)
-        .set_alarms(saved.alarms().cloned())
-        .set_strategy(saved.strategy().cloned())
-        .set_bake_time_in_minutes(saved.bake_time_in_minutes())
-        .set_lifecycle_hooks(
-            (!saved.lifecycle_hooks().is_empty()).then(|| saved.lifecycle_hooks().to_vec()),
-        )
-        .set_linear_configuration(saved.linear_configuration().cloned())
-        .set_canary_configuration(saved.canary_configuration().cloned())
-        .build()
+    let mut cfg = saved.clone();
+    cfg.minimum_healthy_percent = Some(0);
+    cfg.maximum_percent = Some(100);
+    cfg
+}
+
+/// Merge base for restoration: take the service's *current* configuration
+/// (preserving any legitimate concurrent changes to fields this operation
+/// does not own, e.g. alarms or circuit-breaker edits by IaC) and restore
+/// only the two percentages this operation changed.
+fn merged_restore_configuration(
+    current: &DeploymentConfiguration,
+    saved: &DeploymentConfiguration,
+) -> DeploymentConfiguration {
+    let mut cfg = current.clone();
+    cfg.minimum_healthy_percent = saved.minimum_healthy_percent;
+    cfg.maximum_percent = saved.maximum_percent;
+    cfg
+}
+
+/// Whether the service still carries this invocation's temporary values for
+/// the fields it owns (min/max percentages, and the AZ-rebalancing flag when
+/// this invocation disabled it). If not, another writer took ownership and
+/// restoration must fail closed instead of overwriting their change.
+fn temp_policy_owned(
+    current: &DeploymentConfiguration,
+    current_az_enabled: bool,
+    az_was_enabled: bool,
+) -> bool {
+    current.minimum_healthy_percent() == Some(0)
+        && current.maximum_percent() == Some(100)
+        && (!az_was_enabled || !current_az_enabled)
 }
 
 /// Options for [`run_with`].
@@ -57,12 +79,53 @@ pub async fn run(
     .await
 }
 
+/// Cancellation signal for [`run_with_cancel`]. The sender side is owned by
+/// the caller (typically the CLI binary registering Ctrl-C/SIGTERM); sending
+/// `true` requests graceful cancellation — an in-flight recreate restores the
+/// service's deployment configuration before returning an error.
+pub type CancelSignal = tokio::sync::watch::Receiver<bool>;
+
+/// Create a cancellation channel for [`run_with_cancel`].
+pub fn cancel_channel() -> (tokio::sync::watch::Sender<bool>, CancelSignal) {
+    tokio::sync::watch::channel(false)
+}
+
+/// Resolve when cancellation is requested. If the sender is dropped without
+/// ever signalling, this pends forever (no cancellation).
+async fn cancelled(rx: &mut CancelSignal) {
+    loop {
+        if *rx.borrow() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Restart with explicit options. See [`RestartOptions`].
+///
+/// This entry point performs no signal handling of its own; cancellation is
+/// not available. CLI callers that want Ctrl-C/SIGTERM to trigger graceful
+/// restoration should use [`run_with_cancel`] and own signal registration at
+/// the binary boundary.
 pub async fn run_with(
     config: &aws_config::SdkConfig,
     cfg: &Config,
     name: &str,
     opts: RestartOptions,
+) -> Result<()> {
+    let (_tx, rx) = cancel_channel();
+    run_with_cancel(config, cfg, name, opts, rx).await
+}
+
+/// Restart with explicit options and a caller-owned cancellation signal.
+pub async fn run_with_cancel(
+    config: &aws_config::SdkConfig,
+    cfg: &Config,
+    name: &str,
+    opts: RestartOptions,
+    cancel: CancelSignal,
 ) -> Result<()> {
     let targets = cfg.resolve_targets(name);
 
@@ -80,7 +143,8 @@ pub async fn run_with(
         for alias in &targets {
             let (cluster, service) = cfg.resolve_alias(alias)?;
             let (cluster, service) = (cluster.to_string(), service.to_string());
-            recreate_service(&ecs, alias, &cluster, &service).await?;
+            let mut cancel = cancel.clone();
+            recreate_service(&ecs, alias, &cluster, &service, &mut cancel).await?;
         }
         return Ok(());
     }
@@ -125,6 +189,7 @@ async fn recreate_service(
     alias: &str,
     cluster: &str,
     service: &str,
+    cancel: &mut CancelSignal,
 ) -> Result<()> {
     // Read the current service state for preflight + restoration.
     let desc = ecs
@@ -206,10 +271,51 @@ async fn recreate_service(
             aws_sdk_ecs::types::AvailabilityZoneRebalancing::Disabled,
         );
     }
-    let update_resp = update
-        .send()
-        .await
-        .context(format!("UpdateService failed for {alias}"))?;
+    let update_resp = match update.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            // Ambiguous-write reconciliation: a transport error or timeout
+            // does not prove the write was rejected — AWS may have committed
+            // the temporary policy. Read the service back; if the stop-first
+            // values are live, restore before returning the original error.
+            eprintln!("⚠️  {alias}: UpdateService failed; reconciling whether the temporary policy was applied...");
+            match ecs
+                .describe_services()
+                .cluster(cluster)
+                .services(service)
+                .send()
+                .await
+            {
+                Ok(desc) => {
+                    let live = desc.services().first().and_then(|s| {
+                        s.deployment_configuration().map(|c| {
+                            let az_now = matches!(
+                                s.availability_zone_rebalancing(),
+                                Some(aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled)
+                            );
+                            temp_policy_owned(c, az_now, az_enabled)
+                                || (az_enabled && !az_now)
+                                || c.minimum_healthy_percent() == Some(0)
+                                || c.maximum_percent() == Some(100)
+                        })
+                    });
+                    if live == Some(true) {
+                        eprintln!("⚠️  {alias}: temporary policy is live despite the error — restoring...");
+                        match restore_with_retry(ecs, cluster, service, &saved, az_enabled).await {
+                            Ok(()) => eprintln!("✓ Restored previous deployment configuration for {alias}"),
+                            Err(re) => eprintln!(
+                                "❌ {alias}: restoration after ambiguous write also failed ({re}) — restore manually using the recovery snapshot above"
+                            ),
+                        }
+                    }
+                }
+                Err(de) => eprintln!(
+                    "❌ {alias}: could not reconcile ambiguous write ({de}) — verify the service manually against the recovery snapshot above"
+                ),
+            }
+            return Err(anyhow::anyhow!(e).context(format!("UpdateService failed for {alias}")));
+        }
+    };
 
     // Identify the deployment this request created so success can be tied to
     // it (a circuit-breaker rollback creates a different deployment id). A
@@ -226,14 +332,15 @@ async fn recreate_service(
         .map(str::to_string);
 
     // From here on the temporary stop-first policy is live: whatever happens
-    // while waiting — including Ctrl-C — always attempt restoration before
-    // returning. (A hard kill cannot be intercepted; see the recovery
-    // snapshot printed above.)
+    // while waiting — including caller-signalled cancellation (Ctrl-C or
+    // SIGTERM registered at the binary boundary) — always attempt
+    // restoration before returning. (A hard kill cannot be intercepted; see
+    // the recovery snapshot printed above.)
     eprintln!("⏳ Waiting for deployment to stabilize (old task stops before new one starts)...");
     let wait_result: Result<()> = tokio::select! {
         biased;
-        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!(
-            "interrupted (Ctrl-C) while waiting for the recreate deployment"
+        _ = cancelled(cancel) => Err(anyhow::anyhow!(
+            "cancelled while waiting for the recreate deployment"
         )),
         res = tokio::time::timeout(
             RECREATE_WAIT_TIMEOUT,
@@ -321,6 +428,21 @@ async fn verify_deployment(
 /// retrying transient failures, and read the service back to verify the
 /// restored fields actually match the snapshot (an HTTP success alone does
 /// not prove convergence, e.g. under concurrent IaC/operator updates).
+/// Restore the fields this operation changed (min/max percentages, AZ
+/// rebalancing), retrying transient failures.
+///
+/// Each attempt is ownership-aware: it reads the current service first and
+/// verifies the operation-owned fields still carry this invocation's
+/// temporary values. If another writer (IaC, operator) changed them, we no
+/// longer own the state and fail closed instead of overwriting their change.
+/// The restore payload is a merge — the *current* configuration with only
+/// min/max reset from the snapshot — so legitimate concurrent changes to
+/// unowned fields (alarms, circuit breaker, hooks) are preserved.
+///
+/// Residual limitation: ECS offers no compare-and-swap token, so a writer
+/// racing between our read and write (TOCTOU window) can still be
+/// overwritten on the owned fields; unowned fields are never overwritten
+/// beyond that window.
 async fn restore_with_retry(
     ecs: &EcsClient,
     cluster: &str,
@@ -331,23 +453,15 @@ async fn restore_with_retry(
     const ATTEMPTS: u32 = 3;
     let mut last_err = None;
     for attempt in 1..=ATTEMPTS {
-        let mut restore = ecs
-            .update_service()
-            .cluster(cluster)
-            .service(service)
-            .deployment_configuration(saved.clone());
-        if az_enabled {
-            restore = restore.availability_zone_rebalancing(
-                aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled,
-            );
-        }
-        let result = match restore.send().await {
-            Ok(_) => verify_restored(ecs, cluster, service, saved, az_enabled).await,
-            Err(e) => Err(anyhow::anyhow!(e.to_string())),
-        };
+        let result = restore_once(ecs, cluster, service, saved, az_enabled).await;
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
+                // Ownership loss is terminal — retrying would overwrite the
+                // concurrent writer's change.
+                if e.to_string().contains("ownership lost") {
+                    return Err(e);
+                }
                 if attempt < ATTEMPTS {
                     eprintln!("⚠️  restore attempt {attempt}/{ATTEMPTS} failed, retrying: {e}");
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -362,55 +476,92 @@ async fn restore_with_retry(
     ))
 }
 
-/// Compare every deployment configuration field, using whole-object equality
-/// as a future-safe guard if the SDK adds fields after this code is written.
+/// One ownership-checked restore attempt: read, verify ownership, merge,
+/// write, read back and verify the owned fields converged.
+async fn restore_once(
+    ecs: &EcsClient,
+    cluster: &str,
+    service: &str,
+    saved: &DeploymentConfiguration,
+    az_enabled: bool,
+) -> Result<()> {
+    // Pre-write read: confirm we still own the temporary state.
+    let desc = ecs
+        .describe_services()
+        .cluster(cluster)
+        .services(service)
+        .send()
+        .await
+        .context("DescribeServices failed before restoration")?;
+    let svc = desc.services().first().context("service not found")?;
+    let current = svc
+        .deployment_configuration()
+        .context("service has no deploymentConfiguration before restore")?;
+    let current_az_enabled = matches!(
+        svc.availability_zone_rebalancing(),
+        Some(aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled)
+    );
+
+    // Already restored (e.g. by a previous attempt whose response was lost)?
+    if current.minimum_healthy_percent() == saved.minimum_healthy_percent()
+        && current.maximum_percent() == saved.maximum_percent()
+        && current_az_enabled == az_enabled
+    {
+        return Ok(());
+    }
+
+    if !temp_policy_owned(current, current_az_enabled, az_enabled) {
+        anyhow::bail!(
+            "ownership lost: the service's deployment configuration was changed concurrently (min/max are {:?}/{:?}) — not overwriting; reconcile manually or via your IaC",
+            current.minimum_healthy_percent(),
+            current.maximum_percent(),
+        );
+    }
+
+    // Merge: current configuration with only the owned fields restored.
+    let merged = merged_restore_configuration(current, saved);
+    let mut restore = ecs
+        .update_service()
+        .cluster(cluster)
+        .service(service)
+        .deployment_configuration(merged);
+    if az_enabled {
+        restore = restore.availability_zone_rebalancing(
+            aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled,
+        );
+    }
+    restore
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    verify_restored(ecs, cluster, service, saved, az_enabled).await
+}
+
+/// Compare the operation-owned fields (min/max percentages) after a restore.
+/// Unowned fields are intentionally not compared: the merge-restore preserves
+/// concurrent changes to them, so they may legitimately differ from the
+/// pre-mutation snapshot.
 fn validate_restored_configuration(
     current: &DeploymentConfiguration,
     saved: &DeploymentConfiguration,
 ) -> Result<()> {
-    if current == saved {
+    if current.minimum_healthy_percent() == saved.minimum_healthy_percent()
+        && current.maximum_percent() == saved.maximum_percent()
+    {
         return Ok(());
     }
-
-    let mut fields = Vec::new();
-    if current.deployment_circuit_breaker() != saved.deployment_circuit_breaker() {
-        fields.push("deploymentCircuitBreaker");
-    }
-    if current.minimum_healthy_percent() != saved.minimum_healthy_percent() {
-        fields.push("minimumHealthyPercent");
-    }
-    if current.maximum_percent() != saved.maximum_percent() {
-        fields.push("maximumPercent");
-    }
-    if current.alarms() != saved.alarms() {
-        fields.push("alarms");
-    }
-    if current.strategy() != saved.strategy() {
-        fields.push("strategy");
-    }
-    if current.bake_time_in_minutes() != saved.bake_time_in_minutes() {
-        fields.push("bakeTimeInMinutes");
-    }
-    if current.lifecycle_hooks() != saved.lifecycle_hooks() {
-        fields.push("lifecycleHooks");
-    }
-    if current.linear_configuration() != saved.linear_configuration() {
-        fields.push("linearConfiguration");
-    }
-    if current.canary_configuration() != saved.canary_configuration() {
-        fields.push("canaryConfiguration");
-    }
-    if fields.is_empty() {
-        fields.push("unknown/new SDK fields");
-    }
     anyhow::bail!(
-        "restored deployment configuration diverges from the snapshot: {} (concurrent update?)",
-        fields.join(", ")
+        "restored min/max are {:?}/{:?}, expected {:?}/{:?} (concurrent update?)",
+        current.minimum_healthy_percent(),
+        current.maximum_percent(),
+        saved.minimum_healthy_percent(),
+        saved.maximum_percent(),
     );
 }
 
-/// Read the service back and compare the complete deployment configuration
-/// and AZ-rebalancing flag against the pre-mutation snapshot.
+/// Read the service back and compare the operation-owned fields (min/max
+/// percentages and the AZ-rebalancing flag) against the snapshot.
 async fn verify_restored(
     ecs: &EcsClient,
     cluster: &str,
@@ -664,20 +815,52 @@ mod tests {
     }
 
     #[test]
-    fn restore_validation_checks_complete_configuration() {
+    fn restore_validation_compares_owned_fields_only() {
         let saved = saved_configuration();
-        let current = DeploymentConfiguration::builder()
-            .minimum_healthy_percent(75)
-            .maximum_percent(150)
-            .strategy(DeploymentStrategy::Rolling)
-            .bake_time_in_minutes(8)
-            .set_lifecycle_hooks(Some(saved.lifecycle_hooks().to_vec()))
-            .set_linear_configuration(saved.linear_configuration().cloned())
-            .set_canary_configuration(saved.canary_configuration().cloned())
-            .build();
-
-        let error = validate_restored_configuration(&current, &saved).unwrap_err();
-        assert!(error.to_string().contains("bakeTimeInMinutes"));
+        // min/max diverge → error
+        let mut wrong = saved.clone();
+        wrong.minimum_healthy_percent = Some(0);
+        wrong.maximum_percent = Some(100);
+        let error = validate_restored_configuration(&wrong, &saved).unwrap_err();
+        assert!(error.to_string().contains("expected"), "got: {error}");
+        // unowned field diverges (concurrent change preserved by merge) → ok
+        let mut concurrent = saved.clone();
+        concurrent.bake_time_in_minutes = Some(42);
+        assert!(validate_restored_configuration(&concurrent, &saved).is_ok());
         assert!(validate_restored_configuration(&saved, &saved).is_ok());
+    }
+
+    #[test]
+    fn merged_restore_preserves_concurrent_unowned_changes() {
+        let saved = saved_configuration();
+        // Simulate: while we held the temp policy, IaC changed bake time.
+        let mut current = recreate_deployment_configuration(&saved);
+        current.bake_time_in_minutes = Some(42);
+
+        let merged = merged_restore_configuration(&current, &saved);
+        // Owned fields restored from the snapshot…
+        assert_eq!(
+            merged.minimum_healthy_percent(),
+            saved.minimum_healthy_percent()
+        );
+        assert_eq!(merged.maximum_percent(), saved.maximum_percent());
+        // …unowned concurrent change preserved, not rolled back.
+        assert_eq!(merged.bake_time_in_minutes(), Some(42));
+    }
+
+    #[test]
+    fn ownership_detection() {
+        let saved = saved_configuration();
+        let temp = recreate_deployment_configuration(&saved);
+        // Our temp values, AZ disabled after we disabled it → owned.
+        assert!(temp_policy_owned(&temp, false, true));
+        // AZ re-enabled by someone else while we had disabled it → lost.
+        assert!(!temp_policy_owned(&temp, true, true));
+        // AZ was never ours to manage → AZ state irrelevant.
+        assert!(temp_policy_owned(&temp, true, false));
+        // Percentages changed by a concurrent writer → lost.
+        let mut foreign = temp.clone();
+        foreign.maximum_percent = Some(200);
+        assert!(!temp_policy_owned(&foreign, false, true));
     }
 }

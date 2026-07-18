@@ -232,11 +232,41 @@ async fn main() -> anyhow::Result<()> {
             recreate,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run_with(
+            // Signal policy lives here at the binary boundary: Ctrl-C and
+            // (on Unix) SIGTERM request graceful cancellation — an in-flight
+            // recreate restores the service configuration before exiting.
+            // Windows covers Ctrl-C only; a hard kill (SIGKILL) cannot be
+            // intercepted on any platform.
+            let (cancel_tx, cancel_rx) = restart::cancel_channel();
+            tokio::spawn(async move {
+                #[cfg(unix)]
+                {
+                    let mut sigterm = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::terminate(),
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+                eprintln!(
+                    "\n⚠️  cancellation requested — restoring service configuration before exit..."
+                );
+                let _ = cancel_tx.send(true);
+            });
+            restart::run_with_cancel(
                 &aws_config,
                 &cfg,
                 &name,
                 restart::RestartOptions { wait, recreate },
+                cancel_rx,
             )
             .await
         }

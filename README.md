@@ -106,10 +106,17 @@ Constraints and behavior:
   `--wait` is implied. Groups are processed serially.
 - **stopTimeout**: the preflight warns when a container's `stopTimeout` is
   under 120s — shutdown hooks longer than the timeout get SIGKILLed.
-- **Interruption**: Ctrl-C during the wait restores the configuration before
-  exiting. A hard kill (SIGKILL/crash) cannot run cleanup — the recovery
-  snapshot (`minimumHealthyPercent`/`maximumPercent`/AZ-rebalancing values) is
-  printed before mutation. Until restored, future deploys also stop-first.
+- **Interruption**: Ctrl-C and (on Unix) SIGTERM during the wait restore the
+  configuration before exiting; on Windows only Ctrl-C is intercepted. A hard
+  kill (SIGKILL/crash) cannot run cleanup — the recovery snapshot
+  (`minimumHealthyPercent`/`maximumPercent`/AZ-rebalancing values) is printed
+  before mutation. Until restored, future deploys also stop-first.
+- **Concurrent writers**: restoration is ownership-aware — it merges onto the
+  service's *current* configuration (preserving concurrent changes to fields
+  it does not own) and fails closed instead of overwriting if another writer
+  changed the min/max percentages during the operation. ECS has no
+  compare-and-swap, so a tiny read-to-write race window remains on the owned
+  fields only.
 - **Permissions**: needs `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`,
   and `ecs:UpdateService` in addition to the rolling-restart permissions.
 
