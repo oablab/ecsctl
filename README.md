@@ -116,7 +116,7 @@ cargo install --path .
 
 ```toml
 [dependencies]
-ecsctl = { version = "0.9", default-features = false }
+ecsctl = { version = "0.11", default-features = false }
 ```
 
 ### Library-safe modules
