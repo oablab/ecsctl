@@ -121,14 +121,24 @@ async fn recreate_service(
     ))?;
 
     // Preflight (fail closed): stop-then-start semantics are only guaranteed
-    // for a singleton service on the default ECS rolling controller.
-    // CODE_DEPLOY/EXTERNAL controllers ignore deploymentConfiguration
-    // percentages, and with desired > 1 ECS interleaves per-task replacement
-    // (max=100 caps the total, not "all old stopped before any new starts").
+    // for a singleton REPLICA service on the default ECS rolling controller
+    // with the ROLLING deployment strategy. CODE_DEPLOY/EXTERNAL controllers
+    // and native BLUE_GREEN/LINEAR/CANARY strategies ignore or reinterpret
+    // deploymentConfiguration percentages; DAEMON scheduling has no
+    // desiredCount semantics; and with desired > 1 ECS interleaves per-task
+    // replacement (max=100 caps the total, not "all old stopped before any
+    // new starts").
     if let Some(controller) = svc.deployment_controller().map(|c| c.r#type()) {
         if *controller != aws_sdk_ecs::types::DeploymentControllerType::Ecs {
             anyhow::bail!(
                 "{alias}: --recreate requires the default ECS rolling deployment controller (found {controller:?}); CODE_DEPLOY/EXTERNAL controllers ignore deploymentConfiguration percentages"
+            );
+        }
+    }
+    if let Some(sched) = svc.scheduling_strategy() {
+        if *sched != aws_sdk_ecs::types::SchedulingStrategy::Replica {
+            anyhow::bail!(
+                "{alias}: --recreate requires REPLICA scheduling (found {sched:?}); DAEMON services have no singleton stop-then-start semantics"
             );
         }
     }
@@ -139,7 +149,21 @@ async fn recreate_service(
         );
     }
 
-    let saved = svc.deployment_configuration().cloned();
+    // Require a complete restorable snapshot before mutating anything —
+    // without it, restoration could silently no-op and leave the temporary
+    // stop-first policy active.
+    let saved = svc.deployment_configuration().cloned().with_context(|| {
+        format!(
+            "{alias}: DescribeServices returned no deploymentConfiguration — cannot guarantee restoration, aborting before mutation"
+        )
+    })?;
+    if let Some(strategy) = saved.strategy() {
+        if *strategy != aws_sdk_ecs::types::DeploymentStrategy::Rolling {
+            anyhow::bail!(
+                "{alias}: --recreate requires the ROLLING deployment strategy (found {strategy:?}); min/max percentages do not provide stop-then-start under native blue/green or canary strategies"
+            );
+        }
+    }
     // ECS rejects maximumPercent <= 100 while Availability Zone Rebalancing
     // is enabled — disable it for the recreate and restore it afterwards.
     let az_enabled = matches!(
@@ -191,14 +215,22 @@ async fn recreate_service(
     let mut builder = DeploymentConfiguration::builder()
         .minimum_healthy_percent(0)
         .maximum_percent(100);
-    if let Some(prev) = &saved {
-        if let Some(cb) = prev.deployment_circuit_breaker() {
-            builder = builder.deployment_circuit_breaker(cb.clone());
-        }
-        if let Some(alarms) = prev.alarms() {
-            builder = builder.alarms(alarms.clone());
-        }
+    if let Some(cb) = saved.deployment_circuit_breaker() {
+        builder = builder.deployment_circuit_breaker(cb.clone());
     }
+    if let Some(alarms) = saved.alarms() {
+        builder = builder.alarms(alarms.clone());
+    }
+
+    // Print the recovery snapshot BEFORE mutating: if this process is killed
+    // (SIGKILL, crash) after the update, no in-process cleanup can run — the
+    // operator recovers from this line. Ctrl-C is handled below.
+    eprintln!(
+        "ℹ️  {alias}: recovery snapshot — minimumHealthyPercent={} maximumPercent={} availabilityZoneRebalancing={}",
+        saved.minimum_healthy_percent().unwrap_or(100),
+        saved.maximum_percent().unwrap_or(200),
+        if az_enabled { "ENABLED" } else { "DISABLED" },
+    );
 
     eprintln!("🔄 Restarting {alias} ({service}) [recreate: stop old task first]...");
     let mut update = ecs
@@ -218,7 +250,9 @@ async fn recreate_service(
         .context(format!("UpdateService failed for {alias}"))?;
 
     // Identify the deployment this request created so success can be tied to
-    // it (a circuit-breaker rollback creates a different deployment id).
+    // it (a circuit-breaker rollback creates a different deployment id). A
+    // missing id disables the identity check, so it is a verification error
+    // (fail closed) rather than a silent pass.
     let expected_deployment = update_resp
         .service()
         .and_then(|s| {
@@ -230,22 +264,28 @@ async fn recreate_service(
         .map(str::to_string);
 
     // From here on the temporary stop-first policy is live: whatever happens
-    // while waiting, always attempt restoration before returning.
+    // while waiting — including Ctrl-C — always attempt restoration before
+    // returning. (A hard kill cannot be intercepted; see the recovery
+    // snapshot printed above.)
     eprintln!("⏳ Waiting for deployment to stabilize (old task stops before new one starts)...");
-    let wait_result: Result<()> = match tokio::time::timeout(
-        RECREATE_WAIT_TIMEOUT,
-        crate::apply::wait_for_stable(ecs, cluster, service),
-    )
-    .await
-    {
-        Ok(Ok(())) => {
-            verify_deployment(ecs, cluster, service, expected_deployment.as_deref()).await
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(anyhow::anyhow!(
-            "timed out after {}s waiting for the recreate deployment to stabilize",
-            RECREATE_WAIT_TIMEOUT.as_secs()
+    let wait_result: Result<()> = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!(
+            "interrupted (Ctrl-C) while waiting for the recreate deployment"
         )),
+        res = tokio::time::timeout(
+            RECREATE_WAIT_TIMEOUT,
+            crate::apply::wait_for_stable(ecs, cluster, service),
+        ) => match res {
+            Ok(Ok(())) => {
+                verify_deployment(ecs, cluster, service, expected_deployment.as_deref()).await
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "timed out after {}s waiting for the recreate deployment to stabilize",
+                RECREATE_WAIT_TIMEOUT.as_secs()
+            )),
+        },
     };
     if wait_result.is_ok() {
         eprintln!("✓ Deployment stable for {alias}");
@@ -253,11 +293,11 @@ async fn recreate_service(
 
     // Restore the previous deployment configuration (and AZ rebalancing if
     // it was enabled). A config-only update does not launch or stop tasks.
-    let restore_result = restore_with_retry(ecs, cluster, service, saved, az_enabled).await;
+    let restore_result = restore_with_retry(ecs, cluster, service, &saved, az_enabled).await;
     match &restore_result {
         Ok(()) => eprintln!("✓ Restored previous deployment configuration for {alias}"),
         Err(e) => eprintln!(
-            "❌ {alias}: failed to restore deployment configuration ({e}) — the service is left with min=0/max=100 (future deploys stop-first); restore manually with `aws ecs update-service`"
+            "❌ {alias}: failed to restore deployment configuration ({e}) — the service is left with min=0/max=100 (future deploys stop-first); restore manually with `aws ecs update-service` using the recovery snapshot above"
         ),
     }
 
@@ -287,10 +327,12 @@ async fn verify_deployment(
     service: &str,
     expected_id: Option<&str>,
 ) -> Result<()> {
-    let Some(expected_id) = expected_id else {
-        // UpdateService did not return a deployment id; nothing to verify.
-        return Ok(());
-    };
+    // Fail closed: without the id of the deployment this recreate created,
+    // the identity check below cannot run, and a rolled-back or concurrently
+    // superseded deployment could be mistaken for success.
+    let expected_id = expected_id.context(
+        "UpdateService returned no PRIMARY deployment id — cannot verify the recreate deployment",
+    )?;
     let desc = ecs
         .describe_services()
         .cluster(cluster)
@@ -314,31 +356,35 @@ async fn verify_deployment(
 }
 
 /// Restore the saved deployment configuration and AZ-rebalancing setting,
-/// retrying transient failures before giving up.
+/// retrying transient failures, and read the service back to verify the
+/// restored fields actually match the snapshot (an HTTP success alone does
+/// not prove convergence, e.g. under concurrent IaC/operator updates).
 async fn restore_with_retry(
     ecs: &EcsClient,
     cluster: &str,
     service: &str,
-    saved: Option<DeploymentConfiguration>,
+    saved: &DeploymentConfiguration,
     az_enabled: bool,
 ) -> Result<()> {
-    if saved.is_none() && !az_enabled {
-        return Ok(());
-    }
     const ATTEMPTS: u32 = 3;
     let mut last_err = None;
     for attempt in 1..=ATTEMPTS {
-        let mut restore = ecs.update_service().cluster(cluster).service(service);
-        if let Some(prev) = saved.clone() {
-            restore = restore.deployment_configuration(prev);
-        }
+        let mut restore = ecs
+            .update_service()
+            .cluster(cluster)
+            .service(service)
+            .deployment_configuration(saved.clone());
         if az_enabled {
             restore = restore.availability_zone_rebalancing(
                 aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled,
             );
         }
-        match restore.send().await {
-            Ok(_) => return Ok(()),
+        let result = match restore.send().await {
+            Ok(_) => verify_restored(ecs, cluster, service, saved, az_enabled).await,
+            Err(e) => Err(anyhow::anyhow!(e.to_string())),
+        };
+        match result {
+            Ok(()) => return Ok(()),
             Err(e) => {
                 if attempt < ATTEMPTS {
                     eprintln!("⚠️  restore attempt {attempt}/{ATTEMPTS} failed, retrying: {e}");
@@ -352,4 +398,59 @@ async fn restore_with_retry(
         "all {ATTEMPTS} restore attempts failed: {}",
         last_err.map(|e| e.to_string()).unwrap_or_default()
     ))
+}
+
+/// Read the service back and compare the restored fields against the
+/// snapshot. Compares min/max percentages, circuit-breaker settings, and the
+/// AZ-rebalancing flag; a mismatch indicates the restore did not converge
+/// (or a concurrent update diverged the service).
+async fn verify_restored(
+    ecs: &EcsClient,
+    cluster: &str,
+    service: &str,
+    saved: &DeploymentConfiguration,
+    az_enabled: bool,
+) -> Result<()> {
+    let desc = ecs
+        .describe_services()
+        .cluster(cluster)
+        .services(service)
+        .send()
+        .await
+        .context("DescribeServices failed during restore verification")?;
+    let svc = desc.services().first().context("service not found")?;
+    let current = svc
+        .deployment_configuration()
+        .context("service has no deploymentConfiguration after restore")?;
+
+    if current.minimum_healthy_percent() != saved.minimum_healthy_percent()
+        || current.maximum_percent() != saved.maximum_percent()
+    {
+        anyhow::bail!(
+            "restored deployment configuration diverges: min/max are {:?}/{:?}, expected {:?}/{:?} (concurrent update?)",
+            current.minimum_healthy_percent(),
+            current.maximum_percent(),
+            saved.minimum_healthy_percent(),
+            saved.maximum_percent(),
+        );
+    }
+    if current.deployment_circuit_breaker() != saved.deployment_circuit_breaker() {
+        anyhow::bail!("restored circuit-breaker settings diverge from the snapshot");
+    }
+    let current_az_enabled = matches!(
+        svc.availability_zone_rebalancing(),
+        Some(aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled)
+    );
+    if current_az_enabled != az_enabled {
+        anyhow::bail!(
+            "availabilityZoneRebalancing is {} after restore, expected {}",
+            if current_az_enabled {
+                "ENABLED"
+            } else {
+                "DISABLED"
+            },
+            if az_enabled { "ENABLED" } else { "DISABLED" },
+        );
+    }
+    Ok(())
 }
