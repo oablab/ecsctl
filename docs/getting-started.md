@@ -1,0 +1,343 @@
+# Getting Started
+
+Complete reference for every `ecsctl` command, the service spec, configuration,
+and how the file-transfer machinery works. For a quick overview, see the
+[README](../README.md).
+
+## Contents
+
+- [Commands](#commands)
+- [Alias Groups](#alias-groups)
+- [Shell Aliases (Sugar)](#shell-aliases-sugar)
+- [Service Spec](#service-spec)
+- [How `cp` and `sync` work](#how-cp-and-sync-work)
+- [Configuration](#configuration)
+- [Requirements](#requirements)
+
+## Commands
+
+### `ecsctl apply` — deploy a service declaratively
+
+```bash
+ecsctl apply -f service.yaml
+ecsctl apply -f https://example.com/service.yaml   # remote URL
+ecsctl apply -f service.yaml --set spec.cpu=1024 --set metadata.name=my-app2
+ecsctl apply -f service.yaml --wait
+```
+
+Registers a task definition and creates/updates the ECS service. Auto-registers an alias.
+
+- `-f` accepts a local file path or a remote HTTPS URL
+- `--set KEY=VALUE` — override spec fields without editing the YAML (repeatable)
+- `--wait` — block until the deployment stabilizes (all tasks running)
+
+### `ecsctl delete` — remove a service
+
+```bash
+ecsctl delete chaodu              # by alias
+ecsctl delete -f service.yaml     # by spec file
+ecsctl delete -f https://example.com/service.yaml  # remote URL
+```
+
+Scales to 0, deletes the service, removes the alias.
+
+### `ecsctl restart` — force restart a service or group
+
+```bash
+ecsctl restart chaodu             # single service
+ecsctl restart @all               # restart all services in group
+ecsctl restart chaodu --wait      # wait for stabilization
+ecsctl restart chaodu --recreate  # stop old task FIRST, then start the new one
+```
+
+Triggers a new deployment (rolling replacement of all tasks).
+
+**`--recreate` — stop-then-start (brief downtime).** The default rolling
+restart launches the replacement before draining the old task; for
+single-instance stateful services this means two instances briefly overlap
+(duplicate bot tokens, OAuth refresh-token races) and the replacement seeds
+state from a backup taken *before* the old task's final shutdown hooks ran.
+`--recreate` temporarily sets `minimumHealthyPercent=0` / `maximumPercent=100`
+so ECS fully stops the old task (running its shutdown hooks) before launching
+the new one, then restores the previous deployment configuration and verifies
+the restore by reading the service back.
+
+Constraints and behavior:
+
+- **Requires** the default ECS rolling deployment controller, the `ROLLING`
+  deployment strategy, `REPLICA` scheduling, and `desiredCount=1` — anything
+  else fails closed before mutation (no singleton stop-then-start guarantee).
+- **Downtime**: roughly old-task drain + image pull + boot (~1–2 min).
+- **Always waits** for the deployment to stabilize (bounded at 15 min);
+  `--wait` is implied. Groups are processed serially.
+- **stopTimeout**: the preflight warns when a container's `stopTimeout` is
+  under 120s — shutdown hooks longer than the timeout get SIGKILLed.
+- **Interruption**: Ctrl-C and (on Unix) SIGTERM during the wait restore the
+  configuration before exiting; on Windows only Ctrl-C is intercepted. A hard
+  kill (SIGKILL/crash) cannot run cleanup — the recovery snapshot
+  (`minimumHealthyPercent`/`maximumPercent`/AZ-rebalancing values) is printed
+  before mutation. Until restored, future deploys also stop-first.
+- **Concurrent writers**: restoration is ownership-aware — it merges onto the
+  service's *current* configuration (preserving concurrent changes to fields
+  it does not own) and fails closed instead of overwriting if another writer
+  changed the min/max percentages during the operation. ECS has no
+  compare-and-swap, so a tiny read-to-write race window remains on the owned
+  fields only.
+- **Permissions**: needs `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`,
+  and `ecs:UpdateService` in addition to the rolling-restart permissions.
+
+If automatic restoration fails, first read the full current configuration (all
+unrelated fields were preserved), then replace only its min/max values from the
+printed snapshot and submit the complete JSON. Reapply the service's normal IaC
+and verify with `aws ecs describe-services` afterward:
+
+```bash
+aws ecs describe-services --cluster <cluster> --services <service> \
+  --query 'services[0].deploymentConfiguration' --output json
+aws ecs update-service --cluster <cluster> --service <service> \
+  --deployment-configuration '<full JSON above with the saved min/max>' \
+  --availability-zone-rebalancing ENABLED  # include only if the snapshot said ENABLED
+```
+
+### `ecsctl scale` — scale a service or group
+
+```bash
+ecsctl scale chaodu 0          # scale to 0 (no running tasks)
+ecsctl scale chaodu 1          # scale to 1 task
+ecsctl scale chaodu 3 --wait   # scale to 3 and wait for stabilization
+ecsctl scale @small 0          # scale all aliases in group "small" to 0
+ecsctl scale @all 1            # bring up entire fleet
+```
+
+Sets the desired task count for a service or all services in a `@group`. Use `--wait` to block until stable (single target only).
+
+### `ecsctl schedule` — manage recurring scaling schedules
+
+```bash
+# Create a schedule to scale down at night (Taipei time)
+ecsctl schedule create chaodu 0 --expr 'cron(0 22 * * ? *)' --timezone 'Asia/Taipei' --role-arn arn:aws:iam::123456789012:role/ecsctl-scheduler-role
+
+# Create a schedule for an entire group
+ecsctl schedule create @all 1 --expr 'cron(0 8 * * ? *)'
+
+# List all schedules (shows expression, timezone, target details)
+ecsctl schedule list
+
+# Delete a schedule by name
+ecsctl schedule delete ecsctl-scale-chaodu-to-0
+```
+
+Manages recurring ECS scaling schedules via [EventBridge Scheduler](https://docs.aws.amazon.com/scheduler/latest/UserGuide/what-is-scheduler.html). Schedules fire independently — no Lambda needed.
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--expression` (alias: `--expr`) | Schedule expression: `cron(...)`, `rate(...)`, or `at(...)` |
+| `--timezone` | IANA timezone for schedule evaluation (default: `UTC`) |
+| `--role-arn` | IAM role ARN for Scheduler execution (**required** — via flag or `[scheduler].role_arn` in config.toml) |
+| `--schedule-name` | Explicit schedule name (overrides auto-generated name). Use for multiple schedules on the same alias/count, e.g. weekday vs weekend. |
+
+**Config support:**
+
+```toml
+[scheduler]
+role_arn = "arn:aws:iam::123456789012:role/ecsctl-scheduler-role"
+group_name = "my-schedules"   # optional, default: "ecsctl-schedules"
+```
+
+The `role_arn` in config.toml is used when `--role-arn` is not provided on the command line.
+
+#### Limitations
+
+- **No Dead-Letter Queue (DLQ)** — if a scheduled scale action fails (e.g. IAM role deleted, service not found, API throttling), the failure is silent. Monitor the CloudWatch metric `ScheduleInvocationsFailed` in the `AWS/Scheduler` namespace to detect failures.
+- **Application Auto Scaling (AAS) conflict** — if your service has AAS policies with min/max capacity, EventBridge Scheduler's `UpdateService(DesiredCount)` may be immediately overridden by AAS restoring the count. In this case, use AAS Scheduled Actions instead (`aws application-autoscaling put-scheduled-action`), or ensure your AAS min capacity is also adjusted by a separate schedule.
+- **Schedule lifecycle is independent of aliases** — deleting an alias (`ecsctl alias rm`) does not remove associated schedules. Use `ecsctl schedule list` to identify and `ecsctl schedule delete` to clean up orphaned schedules.
+
+### `ecsctl update` — update a service in-place
+
+```bash
+ecsctl update chaodu --set spec.cpu=512
+ecsctl update chaodu --set spec.image=nginx:latest --set spec.memory=1024
+ecsctl update chaodu --set spec.desiredCount=2 --wait
+```
+
+Equivalent to `export` → `apply --set`, but without an intermediate file. Requires at least one `--set` override. Blocked from changing `metadata.name` or `metadata.cluster` (use `clone` instead). Aborts if the service has sidecar containers.
+
+### `ecsctl clone` — clone a service
+
+```bash
+ecsctl clone botA botB                              # exact copy, new name
+ecsctl clone botA botB --set spec.cpu=2048          # clone with overrides
+ecsctl clone botA botB --set spec.capacity=FARGATE  # switch to on-demand
+```
+
+Exports the source service and deploys it under a new name. Supports `--set` for overrides.
+
+### `ecsctl export` — export a running service to YAML
+
+```bash
+ecsctl export chaodu                  # → service.yaml
+ecsctl export chaodu -o chaodu.yaml   # custom output file
+```
+
+Enables round-trip workflows: export → edit → apply.
+
+### `ecsctl exec` — execute a command in a container
+
+```bash
+ecsctl exec chaodu                       # /bin/sh (default)
+ecsctl exec chaodu bash                  # bash
+ecsctl exec chaodu -- cat /etc/hosts     # command with args
+```
+
+### `ecsctl cp` — copy files to/from a container
+
+```bash
+ecsctl cp myfile.txt chaodu:/tmp/myfile.txt      # upload
+ecsctl cp chaodu:/tmp/output.log ./output.log    # download
+```
+
+### `ecsctl sync` — sync a local directory to a container
+
+```bash
+ecsctl sync ./my-app chaodu:/opt/app
+```
+
+### `ecsctl get` — describe a task
+
+```bash
+ecsctl get chaodu              # human-readable
+ecsctl get chaodu -o json      # JSON (pipe to jq)
+ecsctl get chaodu -o json | jq '.tasks[0].capacity'
+ecsctl get chaodu -o "jsonpath='http://{.tasks[0].public_ip}:8080'"  # template
+```
+
+Output includes: status, public/private IP, health, CPU/memory, arch, capacity provider, AZ, connectivity, exec status, env vars (secrets masked), and recent logs.
+
+### `ecsctl log` — view logs
+
+```bash
+ecsctl log chaodu              # last 20 lines
+ecsctl log chaodu -n 50        # last 50 lines
+ecsctl log chaodu -f           # live tail (Ctrl+C to stop)
+```
+
+### `ecsctl alias` — manage target aliases
+
+```bash
+ecsctl alias set my-cluster/my-service myapp
+ecsctl alias ls
+ecsctl alias rm myapp
+```
+
+Alias format: `cluster/service[/container[/task_id]]`. Omitted parts are auto-resolved at runtime.
+
+### Alias Groups
+
+Define named groups in `~/.ecsctl/config.toml` for batch operations:
+
+```toml
+[groups]
+all = ["chaodu", "koudu", "juedu", "kongming", "xiaoqiao"]
+small = ["kongming", "xiaoqiao", "guanyu"]
+kiro = ["chaodu", "zhangfei", "telegram"]
+```
+
+Use `@group` syntax with `restart` and `scale`:
+
+```bash
+ecsctl restart @all            # restart entire fleet
+ecsctl scale @small 0          # stop lightweight bots
+ecsctl scale @kiro 1           # start kiro-backed bots
+```
+
+## Shell Aliases (Sugar)
+
+Add to `~/.bashrc` or `~/.zshrc`:
+
+```bash
+ecsh()   { ecsctl exec "$1" bash; }
+ecscp()  { ecsctl cp "$1" "$2"; }
+ecsync() { ecsctl sync "$1" "$2"; }
+```
+
+| Alias | Equivalent | Example |
+|-------|-----------|---------|
+| `ecsh <alias>` | `ecsctl exec <alias> bash` | `ecsh chaodu` |
+| `ecscp <src> <dst>` | `ecsctl cp <src> <dst>` | `ecscp myfile.txt chaodu:/tmp/` |
+| `ecsync <dir> <dst>` | `ecsctl sync <dir> <dst>` | `ecsync ./app chaodu:/opt/app` |
+
+## Service Spec
+
+Add this comment for editor autocomplete (VS Code + YAML extension):
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oablab/ecsctl/master/schemas/service.schema.json
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: my-app
+  cluster: my-cluster
+spec:
+  image: nginx:latest
+  cpu: "256"
+  memory: "512"
+  arch: X86_64              # or ARM64
+  capacity: FARGATE_SPOT    # or FARGATE
+  desiredCount: 1
+  execEnabled: true
+  port: 80
+  containerName: app
+  executionRoleArn: arn:aws:iam::...:role/ecsTaskExecutionRole
+  taskRoleArn: arn:aws:iam::...:role/my-task-role
+  subnets: [subnet-aaa, subnet-bbb]
+  securityGroups: [sg-xxx]
+  assignPublicIp: false
+  logGroup: /ecs/my-app
+  env:
+    APP_ENV: production
+  secrets:
+    DB_PASSWORD: arn:aws:secretsmanager:...:secret:my-db
+  command: ["sh", "-c", "exec my-app serve"]   # optional: override container command
+```
+
+## How `cp` and `sync` work
+
+```
+┌──────────┐       ┌────────┐       ┌─────────────────────────────┐
+│  Local   │──tar─▶│   S3   │       │  ECS Fargate Container      │
+│  Machine │       │ Bucket │       │                             │
+│          │       │        │──presigned URL──▶ wget/curl | tar x │
+│          │       │(delete)│◀──────│                             │
+└──────────┘       └────────┘       └─────────────────────────────┘
+```
+
+No AWS CLI needed inside the container — only `curl`/`wget` (+ `tar` for sync).
+
+## Configuration
+
+`~/.ecsctl/config.toml`:
+
+```toml
+# S3 bucket for staging (auto-created as ecsctl-staging-{account_id} if unset)
+# bucket = "my-custom-bucket"
+
+# Presigned URL expiry in seconds (default: 60)
+presign_expiry = 60
+
+[aliases]
+myapp = "my-cluster/my-service"
+
+[scheduler]
+role_arn = "arn:aws:iam::123456789012:role/ecsctl-scheduler-role"
+# group_name = "ecsctl-schedules"  # optional, default shown
+```
+
+## Requirements
+
+- AWS credentials configured
+- ECS Exec enabled on the service (`EnableExecuteCommand: true`)
+- Task role with SSM permissions
+- Container must have `curl` or `wget` (+ `tar` for sync)
+- [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed locally
