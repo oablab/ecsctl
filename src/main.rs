@@ -74,6 +74,12 @@ enum Command {
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
+        /// Stop the old task first, then start the new one (brief downtime).
+        /// Avoids the rolling-update overlap: no duplicate instances, and the
+        /// replacement seeds state written by the old task's shutdown hooks.
+        /// Implies waiting for the deployment to stabilize.
+        #[arg(long)]
+        recreate: bool,
     },
     /// Scale a service or @group to a desired task count (immediate)
     Scale {
@@ -220,9 +226,13 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             delete::run(&aws_config, &cfg, name.as_deref(), file.as_deref()).await
         }
-        Command::Restart { name, wait } => {
+        Command::Restart {
+            name,
+            wait,
+            recreate,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run(&aws_config, &cfg, &name, wait).await
+            restart::run(&aws_config, &cfg, &name, wait, recreate).await
         }
         Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
