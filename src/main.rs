@@ -232,7 +232,13 @@ async fn main() -> anyhow::Result<()> {
             recreate,
         } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run(&aws_config, &cfg, &name, wait, recreate).await
+            restart::run_with(
+                &aws_config,
+                &cfg,
+                &name,
+                restart::RestartOptions { wait, recreate },
+            )
+            .await
         }
         Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
