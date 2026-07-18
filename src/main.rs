@@ -74,6 +74,12 @@ enum Command {
         /// Wait for deployment to stabilize
         #[arg(long)]
         wait: bool,
+        /// Stop the old task first, then start the new one (brief downtime).
+        /// Avoids the rolling-update overlap: no duplicate instances, and the
+        /// replacement seeds state written by the old task's shutdown hooks.
+        /// Implies waiting for the deployment to stabilize.
+        #[arg(long)]
+        recreate: bool,
     },
     /// Scale a service or @group to a desired task count (immediate)
     Scale {
@@ -220,9 +226,49 @@ async fn main() -> anyhow::Result<()> {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             delete::run(&aws_config, &cfg, name.as_deref(), file.as_deref()).await
         }
-        Command::Restart { name, wait } => {
+        Command::Restart {
+            name,
+            wait,
+            recreate,
+        } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            restart::run(&aws_config, &cfg, &name, wait).await
+            // Signal policy lives here at the binary boundary: Ctrl-C and
+            // (on Unix) SIGTERM request graceful cancellation — an in-flight
+            // recreate restores the service configuration before exiting.
+            // Windows covers Ctrl-C only; a hard kill (SIGKILL) cannot be
+            // intercepted on any platform.
+            let (cancel_tx, cancel_rx) = restart::cancel_channel();
+            tokio::spawn(async move {
+                #[cfg(unix)]
+                {
+                    let mut sigterm = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::terminate(),
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+                eprintln!(
+                    "\n⚠️  cancellation requested — restoring service configuration before exit..."
+                );
+                let _ = cancel_tx.send(true);
+            });
+            restart::run_with_cancel(
+                &aws_config,
+                &cfg,
+                &name,
+                restart::RestartOptions { wait, recreate },
+                cancel_rx,
+            )
+            .await
         }
         Command::Scale { name, count, wait } => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
