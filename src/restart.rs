@@ -120,56 +120,9 @@ async fn recreate_service(
         "service '{service}' not found in cluster '{cluster}'"
     ))?;
 
-    // Preflight (fail closed): stop-then-start semantics are only guaranteed
-    // for a singleton REPLICA service on the default ECS rolling controller
-    // with the ROLLING deployment strategy. CODE_DEPLOY/EXTERNAL controllers
-    // and native BLUE_GREEN/LINEAR/CANARY strategies ignore or reinterpret
-    // deploymentConfiguration percentages; DAEMON scheduling has no
-    // desiredCount semantics; and with desired > 1 ECS interleaves per-task
-    // replacement (max=100 caps the total, not "all old stopped before any
-    // new starts").
-    if let Some(controller) = svc.deployment_controller().map(|c| c.r#type()) {
-        if *controller != aws_sdk_ecs::types::DeploymentControllerType::Ecs {
-            anyhow::bail!(
-                "{alias}: --recreate requires the default ECS rolling deployment controller (found {controller:?}); CODE_DEPLOY/EXTERNAL controllers ignore deploymentConfiguration percentages"
-            );
-        }
-    }
-    if let Some(sched) = svc.scheduling_strategy() {
-        if *sched != aws_sdk_ecs::types::SchedulingStrategy::Replica {
-            anyhow::bail!(
-                "{alias}: --recreate requires REPLICA scheduling (found {sched:?}); DAEMON services have no singleton stop-then-start semantics"
-            );
-        }
-    }
-    let desired = svc.desired_count();
-    if desired != 1 {
-        anyhow::bail!(
-            "{alias}: --recreate guarantees stop-then-start only for singleton services (desiredCount=1, found {desired}); with multiple tasks ECS interleaves per-task replacement"
-        );
-    }
-
-    // Require a complete restorable snapshot before mutating anything —
-    // without it, restoration could silently no-op and leave the temporary
-    // stop-first policy active.
-    let saved = svc.deployment_configuration().cloned().with_context(|| {
-        format!(
-            "{alias}: DescribeServices returned no deploymentConfiguration — cannot guarantee restoration, aborting before mutation"
-        )
-    })?;
-    if let Some(strategy) = saved.strategy() {
-        if *strategy != aws_sdk_ecs::types::DeploymentStrategy::Rolling {
-            anyhow::bail!(
-                "{alias}: --recreate requires the ROLLING deployment strategy (found {strategy:?}); min/max percentages do not provide stop-then-start under native blue/green or canary strategies"
-            );
-        }
-    }
-    // ECS rejects maximumPercent <= 100 while Availability Zone Rebalancing
-    // is enabled — disable it for the recreate and restore it afterwards.
-    let az_enabled = matches!(
-        svc.availability_zone_rebalancing(),
-        Some(aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled)
-    );
+    // Preflight (fail closed) + snapshot capture. See `preflight` for the
+    // guarantees being enforced.
+    let (saved, az_enabled) = preflight(alias, svc)?;
 
     // Preflight: if a container's stopTimeout is shorter than typical
     // shutdown hooks (e.g. state backup to S3), ECS will SIGKILL the task
@@ -453,4 +406,168 @@ async fn verify_restored(
         );
     }
     Ok(())
+}
+
+/// Fail-closed preflight for `--recreate`, returning the restoration
+/// snapshot `(deployment_configuration, az_rebalancing_was_enabled)`.
+///
+/// Stop-then-start semantics are only guaranteed for a singleton REPLICA
+/// service on the default ECS rolling controller with the ROLLING deployment
+/// strategy. CODE_DEPLOY/EXTERNAL controllers and native
+/// BLUE_GREEN/LINEAR/CANARY strategies ignore or reinterpret
+/// deploymentConfiguration percentages; DAEMON scheduling has no
+/// desiredCount semantics; and with desired > 1 ECS interleaves per-task
+/// replacement (max=100 caps the total, not "all old stopped before any new
+/// starts"). A missing deploymentConfiguration aborts before mutation since
+/// restoration could not be guaranteed.
+fn preflight(
+    alias: &str,
+    svc: &aws_sdk_ecs::types::Service,
+) -> Result<(DeploymentConfiguration, bool)> {
+    if let Some(controller) = svc.deployment_controller().map(|c| c.r#type()) {
+        if *controller != aws_sdk_ecs::types::DeploymentControllerType::Ecs {
+            anyhow::bail!(
+                "{alias}: --recreate requires the default ECS rolling deployment controller (found {controller:?}); CODE_DEPLOY/EXTERNAL controllers ignore deploymentConfiguration percentages"
+            );
+        }
+    }
+    if let Some(sched) = svc.scheduling_strategy() {
+        if *sched != aws_sdk_ecs::types::SchedulingStrategy::Replica {
+            anyhow::bail!(
+                "{alias}: --recreate requires REPLICA scheduling (found {sched:?}); DAEMON services have no singleton stop-then-start semantics"
+            );
+        }
+    }
+    let desired = svc.desired_count();
+    if desired != 1 {
+        anyhow::bail!(
+            "{alias}: --recreate guarantees stop-then-start only for singleton services (desiredCount=1, found {desired}); with multiple tasks ECS interleaves per-task replacement"
+        );
+    }
+    let saved = svc.deployment_configuration().cloned().with_context(|| {
+        format!(
+            "{alias}: DescribeServices returned no deploymentConfiguration — cannot guarantee restoration, aborting before mutation"
+        )
+    })?;
+    if let Some(strategy) = saved.strategy() {
+        if *strategy != aws_sdk_ecs::types::DeploymentStrategy::Rolling {
+            anyhow::bail!(
+                "{alias}: --recreate requires the ROLLING deployment strategy (found {strategy:?}); min/max percentages do not provide stop-then-start under native blue/green or canary strategies"
+            );
+        }
+    }
+    let az_enabled = matches!(
+        svc.availability_zone_rebalancing(),
+        Some(aws_sdk_ecs::types::AvailabilityZoneRebalancing::Enabled)
+    );
+    Ok((saved, az_enabled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_ecs::types::{
+        AvailabilityZoneRebalancing, DeploymentController, DeploymentControllerType,
+        DeploymentStrategy, SchedulingStrategy, Service,
+    };
+
+    fn base_service() -> Service {
+        Service::builder()
+            .service_name("svc")
+            .desired_count(1)
+            .deployment_controller(
+                DeploymentController::builder()
+                    .r#type(DeploymentControllerType::Ecs)
+                    .build()
+                    .unwrap(),
+            )
+            .scheduling_strategy(SchedulingStrategy::Replica)
+            .deployment_configuration(
+                DeploymentConfiguration::builder()
+                    .minimum_healthy_percent(100)
+                    .maximum_percent(200)
+                    .build(),
+            )
+            .build()
+    }
+
+    #[test]
+    fn preflight_accepts_singleton_replica_rolling() {
+        let (saved, az) = preflight("t", &base_service()).expect("should pass");
+        assert_eq!(saved.minimum_healthy_percent(), Some(100));
+        assert_eq!(saved.maximum_percent(), Some(200));
+        assert!(!az, "AZ rebalancing unset means disabled");
+    }
+
+    #[test]
+    fn preflight_reports_az_rebalancing_enabled() {
+        let svc = Service::builder()
+            .set_deployment_controller(base_service().deployment_controller().cloned())
+            .set_scheduling_strategy(base_service().scheduling_strategy().cloned())
+            .set_deployment_configuration(base_service().deployment_configuration().cloned())
+            .desired_count(1)
+            .availability_zone_rebalancing(AvailabilityZoneRebalancing::Enabled)
+            .build();
+        let (_, az) = preflight("t", &svc).expect("should pass");
+        assert!(az);
+    }
+
+    #[test]
+    fn preflight_rejects_non_ecs_controller() {
+        let svc = Service::builder()
+            .desired_count(1)
+            .deployment_controller(
+                DeploymentController::builder()
+                    .r#type(DeploymentControllerType::CodeDeploy)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        let err = preflight("t", &svc).unwrap_err().to_string();
+        assert!(err.contains("deployment controller"), "got: {err}");
+    }
+
+    #[test]
+    fn preflight_rejects_daemon_scheduling() {
+        let svc = Service::builder()
+            .desired_count(1)
+            .scheduling_strategy(SchedulingStrategy::Daemon)
+            .build();
+        let err = preflight("t", &svc).unwrap_err().to_string();
+        assert!(err.contains("REPLICA"), "got: {err}");
+    }
+
+    #[test]
+    fn preflight_rejects_non_singleton() {
+        for desired in [0, 2] {
+            let svc = Service::builder().desired_count(desired).build();
+            let err = preflight("t", &svc).unwrap_err().to_string();
+            assert!(err.contains("desiredCount=1"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn preflight_rejects_missing_snapshot() {
+        // desired=1 and default controller/scheduler, but no
+        // deploymentConfiguration → must abort before mutation.
+        let svc = Service::builder().desired_count(1).build();
+        let err = preflight("t", &svc).unwrap_err().to_string();
+        assert!(err.contains("cannot guarantee restoration"), "got: {err}");
+    }
+
+    #[test]
+    fn preflight_rejects_blue_green_strategy() {
+        let svc = Service::builder()
+            .desired_count(1)
+            .deployment_configuration(
+                DeploymentConfiguration::builder()
+                    .minimum_healthy_percent(100)
+                    .maximum_percent(200)
+                    .strategy(DeploymentStrategy::BlueGreen)
+                    .build(),
+            )
+            .build();
+        let err = preflight("t", &svc).unwrap_err().to_string();
+        assert!(err.contains("ROLLING"), "got: {err}");
+    }
 }

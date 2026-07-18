@@ -78,12 +78,42 @@ Scales to 0, deletes the service, removes the alias.
 ### `ecsctl restart` — force restart a service or group
 
 ```bash
-ecsctl restart chaodu          # single service
-ecsctl restart @all            # restart all services in group
-ecsctl restart chaodu --wait   # wait for stabilization
+ecsctl restart chaodu             # single service
+ecsctl restart @all               # restart all services in group
+ecsctl restart chaodu --wait      # wait for stabilization
+ecsctl restart chaodu --recreate  # stop old task FIRST, then start the new one
 ```
 
 Triggers a new deployment (rolling replacement of all tasks).
+
+**`--recreate` — stop-then-start (brief downtime).** The default rolling
+restart launches the replacement before draining the old task; for
+single-instance stateful services this means two instances briefly overlap
+(duplicate bot tokens, OAuth refresh-token races) and the replacement seeds
+state from a backup taken *before* the old task's final shutdown hooks ran.
+`--recreate` temporarily sets `minimumHealthyPercent=0` / `maximumPercent=100`
+so ECS fully stops the old task (running its shutdown hooks) before launching
+the new one, then restores the previous deployment configuration and verifies
+the restore by reading the service back.
+
+Constraints and behavior:
+
+- **Requires** the default ECS rolling deployment controller, the `ROLLING`
+  deployment strategy, `REPLICA` scheduling, and `desiredCount=1` — anything
+  else fails closed before mutation (no singleton stop-then-start guarantee).
+- **Downtime**: roughly old-task drain + image pull + boot (~1–2 min).
+- **Always waits** for the deployment to stabilize (bounded at 15 min);
+  `--wait` is implied. Groups are processed serially.
+- **stopTimeout**: the preflight warns when a container's `stopTimeout` is
+  under 120s — shutdown hooks longer than the timeout get SIGKILLed.
+- **Interruption**: Ctrl-C during the wait restores the configuration before
+  exiting. A hard kill (SIGKILL/crash) cannot run cleanup — the recovery
+  snapshot (`minimumHealthyPercent`/`maximumPercent`/AZ-rebalancing values) is
+  printed before mutation; restore manually with
+  `aws ecs update-service --deployment-configuration ...` using those values.
+  A leftover `min=0/max=100` is benign: future deploys also stop-first.
+- **Permissions**: needs `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`,
+  and `ecs:UpdateService` in addition to the rolling-restart permissions.
 
 ### `ecsctl scale` — scale a service or group
 
