@@ -100,24 +100,184 @@ pub async fn run(
     let logs = LogsClient::new(config);
 
     if follow {
-        tail_follow(&logs, group, &stream_name, lines).await
-    } else {
-        let resp = logs
-            .get_log_events()
-            .log_group_name(group)
-            .log_stream_name(&stream_name)
-            .limit(lines)
-            .start_from_head(false)
-            .send()
-            .await
-            .context("GetLogEvents failed")?;
+        return tail_follow(&logs, group, &stream_name, lines).await;
+    }
 
-        for event in resp.events() {
-            let msg = event.message().unwrap_or("");
+    let events = get_events(&logs, group, &stream_name, lines).await?;
+    if !events.is_empty() {
+        for msg in &events {
             println!("{msg}");
         }
-        Ok(())
+        return Ok(());
     }
+
+    // The selected task's stream has no events yet (e.g. the task is PENDING
+    // during a replacement). Fall back to the newest stream that has events
+    // instead of silently printing nothing.
+    let status = task.last_status().unwrap_or("UNKNOWN");
+    eprintln!("ecsctl: no log events yet for task {task_id} ({status})");
+
+    let stream_prefix = format!("{prefix}/{container_name}/");
+    match fetch_fallback_events(
+        &ecs,
+        &logs,
+        cluster,
+        service,
+        group,
+        &stream_prefix,
+        &stream_name,
+        lines,
+    )
+    .await?
+    {
+        Some((stream, events)) => {
+            let prev_task = stream.rsplit('/').next().unwrap_or("?");
+            eprintln!("ecsctl: showing logs from previous task {prev_task}");
+            for msg in &events {
+                println!("{msg}");
+            }
+        }
+        None => {
+            eprintln!(
+                "ecsctl: no log streams with events found in '{group}' under prefix '{stream_prefix}'"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Fetch up to `lines` log events from a stream, tail-first.
+/// A missing stream (not created yet) is treated as empty, not an error.
+async fn get_events(
+    logs: &LogsClient,
+    group: &str,
+    stream: &str,
+    lines: i32,
+) -> Result<Vec<String>> {
+    let resp = logs
+        .get_log_events()
+        .log_group_name(group)
+        .log_stream_name(stream)
+        .limit(lines)
+        .start_from_head(false)
+        .send()
+        .await;
+
+    match resp {
+        Ok(out) => Ok(out
+            .events()
+            .iter()
+            .map(|e| e.message().unwrap_or("").to_string())
+            .collect()),
+        Err(e) => {
+            if e.as_service_error()
+                .map(|se| se.is_resource_not_found_exception())
+                .unwrap_or(false)
+            {
+                Ok(Vec::new())
+            } else {
+                Err(e).context("GetLogEvents failed")
+            }
+        }
+    }
+}
+
+/// Find the newest stream with events, excluding `exclude`.
+///
+/// Strategy 1: recently stopped tasks of the service (ECS retains them ~1h),
+/// newest first — this covers the common task-replacement window precisely.
+/// Strategy 2: best-effort scan of log streams under the prefix, picking the
+/// stream with the latest lastEventTimestamp. (DescribeLogStreams cannot
+/// combine a name prefix with LastEventTime ordering, so page by name and
+/// take the max client-side, capped at a few pages.)
+#[allow(clippy::too_many_arguments)]
+async fn fetch_fallback_events(
+    ecs: &EcsClient,
+    logs: &LogsClient,
+    cluster: &str,
+    service: &str,
+    group: &str,
+    stream_prefix: &str,
+    exclude: &str,
+    lines: i32,
+) -> Result<Option<(String, Vec<String>)>> {
+    // Strategy 1: recently stopped tasks, newest first
+    let stopped_resp = ecs
+        .list_tasks()
+        .cluster(cluster)
+        .service_name(service)
+        .desired_status(aws_sdk_ecs::types::DesiredStatus::Stopped)
+        .send()
+        .await
+        .context("ListTasks (stopped) failed")?;
+    let stopped_arns: Vec<String> = stopped_resp.task_arns().to_vec();
+
+    if !stopped_arns.is_empty() {
+        let desc = ecs
+            .describe_tasks()
+            .cluster(cluster)
+            .set_tasks(Some(stopped_arns))
+            .send()
+            .await?;
+        let mut tasks = desc.tasks().to_vec();
+        tasks.sort_by_key(|t| std::cmp::Reverse(t.stopped_at().or(t.started_at()).copied()));
+
+        for t in &tasks {
+            let tid = t
+                .task_arn()
+                .unwrap_or("?")
+                .rsplit('/')
+                .next()
+                .unwrap_or("?");
+            let stream = format!("{stream_prefix}{tid}");
+            if stream == exclude {
+                continue;
+            }
+            let events = get_events(logs, group, &stream, lines).await?;
+            if !events.is_empty() {
+                return Ok(Some((stream, events)));
+            }
+        }
+    }
+
+    // Strategy 2: scan streams under the prefix for the latest lastEventTimestamp
+    let mut best: Option<(i64, String)> = None;
+    let mut next_token: Option<String> = None;
+    for _ in 0..4 {
+        let mut req = logs
+            .describe_log_streams()
+            .log_group_name(group)
+            .log_stream_name_prefix(stream_prefix)
+            .limit(50);
+        if let Some(t) = next_token {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("DescribeLogStreams failed")?;
+        for s in resp.log_streams() {
+            let (Some(name), Some(ts)) = (s.log_stream_name(), s.last_event_timestamp()) else {
+                continue;
+            };
+            if name == exclude {
+                continue;
+            }
+            if best.as_ref().map(|(bts, _)| ts > *bts).unwrap_or(true) {
+                best = Some((ts, name.to_string()));
+            }
+        }
+        next_token = resp.next_token().map(|s| s.to_string());
+        if next_token.is_none() {
+            break;
+        }
+    }
+
+    if let Some((_, stream)) = best {
+        let events = get_events(logs, group, &stream, lines).await?;
+        if !events.is_empty() {
+            return Ok(Some((stream, events)));
+        }
+    }
+
+    Ok(None)
 }
 
 async fn tail_follow(
@@ -127,6 +287,8 @@ async fn tail_follow(
     initial_lines: i32,
 ) -> Result<()> {
     // Get initial batch
+    let mut next_token: Option<String> = None;
+
     let resp = logs
         .get_log_events()
         .log_group_name(group)
@@ -134,17 +296,34 @@ async fn tail_follow(
         .limit(initial_lines)
         .start_from_head(false)
         .send()
-        .await
-        .context("GetLogEvents failed")?;
+        .await;
 
-    for event in resp.events() {
-        let msg = event.message().unwrap_or("");
-        println!("{msg}");
+    match resp {
+        Ok(resp) => {
+            if resp.events().is_empty() {
+                eprintln!("ecsctl: no log events yet in stream '{stream}' — waiting for new events...");
+            }
+            for event in resp.events() {
+                let msg = event.message().unwrap_or("");
+                println!("{msg}");
+            }
+            next_token = resp.next_forward_token().map(|s| s.to_string());
+        }
+        Err(e) => {
+            if e.as_service_error()
+                .map(|se| se.is_resource_not_found_exception())
+                .unwrap_or(false)
+            {
+                eprintln!(
+                    "ecsctl: log stream '{stream}' does not exist yet — waiting for the task to start logging..."
+                );
+            } else {
+                return Err(e).context("GetLogEvents failed");
+            }
+        }
     }
 
     // Use the forward token to poll for new events
-    let mut next_token = resp.next_forward_token().map(|s| s.to_string());
-
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -158,13 +337,24 @@ async fn tail_follow(
             req = req.next_token(token);
         }
 
-        let resp = req.send().await.context("GetLogEvents failed")?;
-
-        for event in resp.events() {
-            let msg = event.message().unwrap_or("");
-            println!("{msg}");
+        match req.send().await {
+            Ok(resp) => {
+                for event in resp.events() {
+                    let msg = event.message().unwrap_or("");
+                    println!("{msg}");
+                }
+                next_token = resp.next_forward_token().map(|s| s.to_string());
+            }
+            Err(e) => {
+                if e.as_service_error()
+                    .map(|se| se.is_resource_not_found_exception())
+                    .unwrap_or(false)
+                {
+                    // Stream still not created — keep waiting
+                    continue;
+                }
+                return Err(e).context("GetLogEvents failed");
+            }
         }
-
-        next_token = resp.next_forward_token().map(|s| s.to_string());
     }
 }
