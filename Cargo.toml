@@ -1,6 +1,6 @@
 [package]
 name = "ecsctl"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2021"
 description = "kubectl-style CLI for AWS ECS Fargate — exec and cp via ECS Exec + S3 presigned URLs"
 license = "MIT"
