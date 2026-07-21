@@ -301,7 +301,9 @@ async fn tail_follow(
     match resp {
         Ok(resp) => {
             if resp.events().is_empty() {
-                eprintln!("ecsctl: no log events yet in stream '{stream}' — waiting for new events...");
+                eprintln!(
+                    "ecsctl: no log events yet in stream '{stream}' — waiting for new events..."
+                );
             }
             for event in resp.events() {
                 let msg = event.message().unwrap_or("");
