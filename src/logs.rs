@@ -147,38 +147,82 @@ pub async fn run(
 }
 
 /// Fetch up to `lines` log events from a stream, tail-first.
-/// A missing stream (not created yet) is treated as empty, not an error.
+/// A missing stream (not created yet) is treated as empty, not an error;
+/// a missing log group is a hard error (permanent misconfiguration).
+///
+/// GetLogEvents may return empty pages that are nonterminal, so an empty
+/// page only proves emptiness once the backward token stops advancing
+/// (bounded at `EMPTY_PAGE_LIMIT` requests).
+const EMPTY_PAGE_LIMIT: usize = 3;
+
 async fn get_events(
     logs: &LogsClient,
     group: &str,
     stream: &str,
     lines: i32,
 ) -> Result<Vec<String>> {
-    let resp = logs
-        .get_log_events()
-        .log_group_name(group)
-        .log_stream_name(stream)
-        .limit(lines)
-        .start_from_head(false)
-        .send()
-        .await;
-
-    match resp {
-        Ok(out) => Ok(out
-            .events()
-            .iter()
-            .map(|e| e.message().unwrap_or("").to_string())
-            .collect()),
-        Err(e) => {
-            if e.as_service_error()
-                .map(|se| se.is_resource_not_found_exception())
-                .unwrap_or(false)
-            {
-                Ok(Vec::new())
-            } else {
-                Err(e).context("GetLogEvents failed")
-            }
+    let mut token: Option<String> = None;
+    for _ in 0..EMPTY_PAGE_LIMIT {
+        let mut req = logs
+            .get_log_events()
+            .log_group_name(group)
+            .log_stream_name(stream)
+            .limit(lines)
+            .start_from_head(false);
+        if let Some(ref t) = token {
+            req = req.next_token(t);
         }
+        match req.send().await {
+            Ok(out) => {
+                if !out.events().is_empty() {
+                    return Ok(out
+                        .events()
+                        .iter()
+                        .map(|e| e.message().unwrap_or("").to_string())
+                        .collect());
+                }
+                // The start of the stream is reached when the returned token
+                // equals the one we passed in; otherwise keep paging backward.
+                let next = out.next_backward_token().map(|s| s.to_string());
+                if next.is_none() || next == token {
+                    return Ok(Vec::new());
+                }
+                token = next;
+            }
+            Err(e) => match classify_not_found(&e) {
+                Some(NotFound::Stream) => return Ok(Vec::new()),
+                Some(NotFound::Group) => {
+                    return Err(e).context(format!("log group '{group}' does not exist"));
+                }
+                None => return Err(e).context("GetLogEvents failed"),
+            },
+        }
+    }
+    Ok(Vec::new())
+}
+
+enum NotFound {
+    Stream,
+    Group,
+}
+
+/// Distinguish a missing log stream (transient — the task has not started
+/// logging yet) from a missing log group (permanent misconfiguration).
+fn classify_not_found(
+    err: &aws_sdk_cloudwatchlogs::error::SdkError<
+        aws_sdk_cloudwatchlogs::operation::get_log_events::GetLogEventsError,
+    >,
+) -> Option<NotFound> {
+    use aws_sdk_cloudwatchlogs::error::ProvideErrorMetadata;
+    let se = err.as_service_error()?;
+    if !se.is_resource_not_found_exception() {
+        return None;
+    }
+    let msg = se.message().unwrap_or("").to_ascii_lowercase();
+    if msg.contains("log group") {
+        Some(NotFound::Group)
+    } else {
+        Some(NotFound::Stream)
     }
 }
 
@@ -186,10 +230,14 @@ async fn get_events(
 ///
 /// Strategy 1: recently stopped tasks of the service (ECS retains them ~1h),
 /// newest first — this covers the common task-replacement window precisely.
+/// Only the `STOPPED_TASK_PROBE_LIMIT` newest stopped tasks are probed to
+/// bound request fan-out.
 /// Strategy 2: best-effort scan of log streams under the prefix, picking the
 /// stream with the latest lastEventTimestamp. (DescribeLogStreams cannot
 /// combine a name prefix with LastEventTime ordering, so page by name and
 /// take the max client-side, capped at a few pages.)
+const STOPPED_TASK_PROBE_LIMIT: usize = 5;
+
 #[allow(clippy::too_many_arguments)]
 async fn fetch_fallback_events(
     ecs: &EcsClient,
@@ -222,7 +270,7 @@ async fn fetch_fallback_events(
         let mut tasks = desc.tasks().to_vec();
         tasks.sort_by_key(|t| std::cmp::Reverse(t.stopped_at().or(t.started_at()).copied()));
 
-        for t in &tasks {
+        for t in tasks.iter().take(STOPPED_TASK_PROBE_LIMIT) {
             let tid = t
                 .task_arn()
                 .unwrap_or("?")
@@ -311,18 +359,17 @@ async fn tail_follow(
             }
             next_token = resp.next_forward_token().map(|s| s.to_string());
         }
-        Err(e) => {
-            if e.as_service_error()
-                .map(|se| se.is_resource_not_found_exception())
-                .unwrap_or(false)
-            {
+        Err(e) => match classify_not_found(&e) {
+            Some(NotFound::Stream) => {
                 eprintln!(
                     "ecsctl: log stream '{stream}' does not exist yet — waiting for the task to start logging..."
                 );
-            } else {
-                return Err(e).context("GetLogEvents failed");
             }
-        }
+            Some(NotFound::Group) => {
+                return Err(e).context(format!("log group '{group}' does not exist"));
+            }
+            None => return Err(e).context("GetLogEvents failed"),
+        },
     }
 
     // Use the forward token to poll for new events
@@ -347,16 +394,14 @@ async fn tail_follow(
                 }
                 next_token = resp.next_forward_token().map(|s| s.to_string());
             }
-            Err(e) => {
-                if e.as_service_error()
-                    .map(|se| se.is_resource_not_found_exception())
-                    .unwrap_or(false)
-                {
-                    // Stream still not created — keep waiting
-                    continue;
+            Err(e) => match classify_not_found(&e) {
+                // Stream still not created — keep waiting
+                Some(NotFound::Stream) => continue,
+                Some(NotFound::Group) => {
+                    return Err(e).context(format!("log group '{group}' does not exist"));
                 }
-                return Err(e).context("GetLogEvents failed");
-            }
+                None => return Err(e).context("GetLogEvents failed"),
+            },
         }
     }
 }
