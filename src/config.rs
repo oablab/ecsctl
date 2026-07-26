@@ -34,7 +34,15 @@ pub struct SchedulerConfig {
 }
 
 impl Config {
+    /// Config file path.
+    ///
+    /// Resolution order:
+    /// 1. `ECSCTL_CONFIG` environment variable (if set and non-empty)
+    /// 2. `~/.ecsctl/config.toml`
     pub fn path() -> PathBuf {
+        if let Some(p) = std::env::var_os("ECSCTL_CONFIG").filter(|p| !p.is_empty()) {
+            return PathBuf::from(p);
+        }
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".ecsctl")
