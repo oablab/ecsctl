@@ -241,6 +241,30 @@ impl ServiceSpec {
                 }
             }
 
+            // Same check for volumes: a duplicate name means mountPoints
+            // referencing it resolve ambiguously, and AWS's own error would
+            // not explain why.
+            {
+                let mut seen = std::collections::HashSet::with_capacity(spec.volumes.len());
+                for vol in &spec.volumes {
+                    if !seen.insert(vol.name.as_str()) {
+                        anyhow::bail!(
+                            "volume name '{}' is used by more than one entry in spec.volumes",
+                            vol.name
+                        );
+                    }
+                }
+            }
+
+            // AWS requires at least one essential container per task; an
+            // all-essential:false spec parses and passes every check above,
+            // then fails at RegisterTaskDefinition.
+            if !containers.iter().any(|c| c.essential) {
+                anyhow::bail!(
+                    "spec.containers has no essential container: every task needs at least one (essential defaults to true, so this means every container explicitly sets essential: false)"
+                );
+            }
+
             let container_names: std::collections::HashSet<&str> =
                 containers.iter().map(|c| c.name.as_str()).collect();
             let essential_by_name: std::collections::HashMap<&str, bool> = containers
@@ -252,6 +276,25 @@ impl ServiceSpec {
 
             for cs in containers {
                 for dep in &cs.depends_on {
+                    // Existence and self-reference first: these are true
+                    // regardless of condition, and checking them after the
+                    // condition-specific rule below meant a self-dependency
+                    // with condition: SUCCESS on an essential container hit
+                    // the essential-target error first ("set essential:
+                    // false"), which is misleading advice for a spec that is
+                    // also invalid for an unrelated reason -- the two errors
+                    // would surface one at a time across two fix attempts.
+                    if !container_names.contains(dep.container_name.as_str()) {
+                        anyhow::bail!(
+                            "container '{}' dependsOn references '{}', which is not defined in spec.containers",
+                            cs.name,
+                            dep.container_name
+                        );
+                    }
+                    if dep.container_name == cs.name {
+                        anyhow::bail!("container '{}' has a dependsOn on itself", cs.name);
+                    }
+
                     // Verified against AWS's own reported error text (the docs
                     // page states the restriction but not which side of the
                     // dependency it binds): "A dependency container with
@@ -289,16 +332,6 @@ impl ServiceSpec {
                             dep.container_name,
                             other
                         ),
-                    }
-                    if !container_names.contains(dep.container_name.as_str()) {
-                        anyhow::bail!(
-                            "container '{}' dependsOn references '{}', which is not defined in spec.containers",
-                            cs.name,
-                            dep.container_name
-                        );
-                    }
-                    if dep.container_name == cs.name {
-                        anyhow::bail!("container '{}' has a dependsOn on itself", cs.name);
                     }
                 }
 
@@ -1069,6 +1102,88 @@ spec:
     assert!(spec.validate().is_err());
 }
 
+#[test]
+fn test_validate_rejects_no_essential_container() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: all-nonessential
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: a
+      image: a:latest
+      essential: false
+    - name: b
+      image: b:latest
+      essential: false
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("essential"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_duplicate_volume_names() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: dup-volume
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: data
+    - name: data
+  containers:
+    - name: app
+      image: app:latest
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("data"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_self_dependency_reported_over_essential_target() {
+    // A container that is essential:true, depends on itself, with condition
+    // SUCCESS, hits two rules at once: self-dependency (always wrong) and
+    // essential-target (wrong only because the target happens to be itself,
+    // which is essential:true here). Self-reference must be reported --
+    // "set essential: false" would be actively wrong advice for a
+    // self-dependency, since making the container non-essential does not
+    // make depending on itself valid.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: self-dep
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      dependsOn:
+        - containerName: app
+          condition: SUCCESS
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("itself"), "error was: {err}");
+    assert!(
+        !err.contains("essential: true"),
+        "reported the essential-target error instead of self-dependency: {err}"
+    );
+}
+
 #[cfg(test)]
 fn sidecar_yaml_with(extra_container_field: &str) -> String {
     format!(
@@ -1115,7 +1230,8 @@ fn test_validate_rejects_unknown_condition() {
         "dependsOn:\n        - containerName: init-perms\n          condition: BOGUS",
     );
     let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
-    assert!(spec.validate().is_err());
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("BOGUS"), "error was: {err}");
 }
 
 #[test]
@@ -1133,7 +1249,16 @@ fn test_validate_rejects_depends_on_self() {
     let yaml =
         sidecar_yaml_with("dependsOn:\n        - containerName: app\n          condition: SUCCESS");
     let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
-    assert!(spec.validate().is_err());
+    // This case is also essential:true depending on itself with SUCCESS,
+    // which would also trip the essential-target check. Asserting the
+    // message pins down that it fails for self-reference specifically (which
+    // is now checked first) rather than passing for an unrelated reason --
+    // a bare is_err() would not catch the check-ordering bug this exact case
+    // exposed during review (the essential-target error fired first and
+    // told the user to "set essential: false", which does not fix a
+    // self-dependency).
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("itself"), "error was: {err}");
 }
 
 #[test]

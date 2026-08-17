@@ -4,6 +4,20 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 
+/// Whether a container definition uses any field the flat single-container
+/// export form cannot represent, and must therefore export through the
+/// containers[] form instead. Pulled out as its own function so the decision
+/// is testable without an AWS client -- ContainerDefinition::builder() is a
+/// pure local constructor.
+fn container_uses_new_fields(cd: &aws_sdk_ecs::types::ContainerDefinition) -> bool {
+    cd.user().is_some()
+        || cd.readonly_root_filesystem().unwrap_or(false)
+        || !cd.entry_point().is_empty()
+        || !cd.depends_on().is_empty()
+        || cd.linux_parameters().is_some()
+        || !cd.mount_points().is_empty()
+}
+
 pub async fn run(
     config: &aws_config::SdkConfig,
     cfg: &Config,
@@ -216,39 +230,141 @@ async fn build_spec(
                 Some(cs_vec),
             )
         } else {
-            // Single-container (original behavior)
+            // Exactly one app container. Whether this exports through the
+            // legacy flat fields or the containers[] form depends on whether
+            // that one container actually uses any of the fields the flat
+            // form cannot represent.
+            //
+            // The bug this replaced: gating on `app_containers.len() > 1`
+            // meant a single container using `user`, `readonlyRootFilesystem`,
+            // `entryPoint`, `dependsOn`, `linuxParameters`, or `mountPoints`
+            // took the flat-field branch below, which reads none of them --
+            // exporting silently dropped every one of those fields. A
+            // one-container hardened service (non-root, read-only rootfs,
+            // dropped capabilities) would round-trip through `export` then
+            // `apply` back to root, writable, full capabilities, with no
+            // error and no field left to notice the loss from.
             let cd = app_containers.first().context("no app container")?;
-            let image = cd.image().unwrap_or("?").to_string();
-            let cn = cd.name().unwrap_or("app").to_string();
-            let port = cd
-                .port_mappings()
-                .first()
-                .map(|p| p.container_port().unwrap_or(0) as u16)
-                .unwrap_or(0);
-            let command: Option<Vec<String>> = {
-                let cmds = cd.command();
-                if cmds.is_empty() {
-                    None
-                } else {
-                    Some(cmds.iter().map(|s| s.to_string()).collect())
+            let uses_new_fields = container_uses_new_fields(cd);
+
+            if uses_new_fields {
+                let mut env_map: HashMap<String, String> = HashMap::new();
+                for kv in cd.environment() {
+                    if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
+                        env_map.insert(k.to_string(), v.to_string());
+                    }
                 }
-            };
-            let mut env: HashMap<String, String> = HashMap::new();
-            for kv in cd.environment() {
-                if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
-                    env.insert(k.to_string(), v.to_string());
+                let mut sec_map: HashMap<String, String> = HashMap::new();
+                for s in cd.secrets() {
+                    sec_map.insert(s.name().to_string(), s.value_from().to_string());
                 }
+                let lg = cd
+                    .log_configuration()
+                    .and_then(|lc| lc.options())
+                    .and_then(|opts| opts.get("awslogs-group"))
+                    .map(|s| s.to_string());
+                let p = cd
+                    .port_mappings()
+                    .first()
+                    .map(|p| p.container_port().unwrap_or(0) as u16)
+                    .unwrap_or(0);
+                let cmd: Option<Vec<String>> = {
+                    let cmds = cd.command();
+                    if cmds.is_empty() {
+                        None
+                    } else {
+                        Some(cmds.iter().map(|s| s.to_string()).collect())
+                    }
+                };
+                let entry_point: Option<Vec<String>> = {
+                    let eps = cd.entry_point();
+                    if eps.is_empty() {
+                        None
+                    } else {
+                        Some(eps.iter().map(|s| s.to_string()).collect())
+                    }
+                };
+                let depends_on: Vec<crate::apply::DependsOn> = cd
+                    .depends_on()
+                    .iter()
+                    .map(|d| crate::apply::DependsOn {
+                        container_name: d.container_name().to_string(),
+                        condition: d.condition().as_str().to_string(),
+                    })
+                    .collect();
+                let linux_parameters = cd.linux_parameters().and_then(|lp| {
+                    lp.capabilities().map(|c| crate::apply::LinuxParameters {
+                        capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
+                    })
+                });
+                let mut mount_points: HashMap<String, String> = HashMap::new();
+                for mp in cd.mount_points() {
+                    if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
+                        mount_points.insert(cp.to_string(), sv.to_string());
+                    }
+                }
+                let cs = crate::apply::ContainerSpec {
+                    name: cd.name().unwrap_or("app").to_string(),
+                    image: cd.image().unwrap_or("?").to_string(),
+                    essential: cd.essential().unwrap_or(true),
+                    port: p,
+                    command: cmd,
+                    entry_point,
+                    env: env_map,
+                    secrets: sec_map,
+                    log_group: lg,
+                    user: cd.user().map(|s| s.to_string()),
+                    readonly_root_filesystem: cd.readonly_root_filesystem().unwrap_or(false),
+                    depends_on,
+                    linux_parameters,
+                    mount_points,
+                };
+                (
+                    String::new(),
+                    "app".to_string(),
+                    0u16,
+                    None,
+                    HashMap::new(),
+                    HashMap::new(),
+                    None,
+                    Some(vec![cs]),
+                )
+            } else {
+                // Original behavior: none of the new fields are in use, so the
+                // flat single-container form round-trips exactly as before
+                // this PR.
+                let image = cd.image().unwrap_or("?").to_string();
+                let cn = cd.name().unwrap_or("app").to_string();
+                let port = cd
+                    .port_mappings()
+                    .first()
+                    .map(|p| p.container_port().unwrap_or(0) as u16)
+                    .unwrap_or(0);
+                let command: Option<Vec<String>> = {
+                    let cmds = cd.command();
+                    if cmds.is_empty() {
+                        None
+                    } else {
+                        Some(cmds.iter().map(|s| s.to_string()).collect())
+                    }
+                };
+                let mut env: HashMap<String, String> = HashMap::new();
+                for kv in cd.environment() {
+                    if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
+                        env.insert(k.to_string(), v.to_string());
+                    }
+                }
+                let mut secrets: HashMap<String, String> = HashMap::new();
+                for s in cd.secrets() {
+                    secrets.insert(s.name().to_string(), s.value_from().to_string());
+                }
+                let log_group = cd
+                    .log_configuration()
+                    .and_then(|lc| lc.options())
+                    .and_then(|opts| opts.get("awslogs-group"))
+                    .map(|s| s.to_string());
+                (image, cn, port, command, env, secrets, log_group, None)
             }
-            let mut secrets: HashMap<String, String> = HashMap::new();
-            for s in cd.secrets() {
-                secrets.insert(s.name().to_string(), s.value_from().to_string());
-            }
-            let log_group = cd
-                .log_configuration()
-                .and_then(|lc| lc.options())
-                .and_then(|opts| opts.get("awslogs-group"))
-                .map(|s| s.to_string());
-            (image, cn, port, command, env, secrets, log_group, None)
         };
 
     // Build YAML
@@ -306,5 +422,100 @@ pub async fn export_to_yaml(
 
     let ecs = EcsClient::new(config);
     let spec = build_spec(&ecs, cluster, service).await?;
+
     serde_yaml::to_string(&spec).context("failed to serialize YAML")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_ecs::types::{
+        ContainerCondition, ContainerDefinition, ContainerDependency, KernelCapabilities,
+        LinuxParameters, MountPoint,
+    };
+
+    #[test]
+    fn test_plain_container_does_not_use_new_fields() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .essential(true)
+            .build();
+        assert!(!container_uses_new_fields(&cd));
+    }
+
+    #[test]
+    fn test_user_triggers_containers_form() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .user("1000")
+            .build();
+        assert!(container_uses_new_fields(&cd));
+    }
+
+    #[test]
+    fn test_readonly_root_filesystem_triggers_containers_form() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .readonly_root_filesystem(true)
+            .build();
+        assert!(container_uses_new_fields(&cd));
+    }
+
+    #[test]
+    fn test_entry_point_triggers_containers_form() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .entry_point("/bin/sh".to_string())
+            .build();
+        assert!(container_uses_new_fields(&cd));
+    }
+
+    #[test]
+    fn test_depends_on_triggers_containers_form() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .depends_on(
+                ContainerDependency::builder()
+                    .container_name("init")
+                    .condition(ContainerCondition::Success)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        assert!(container_uses_new_fields(&cd));
+    }
+
+    #[test]
+    fn test_linux_parameters_triggers_containers_form() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .linux_parameters(
+                LinuxParameters::builder()
+                    .capabilities(KernelCapabilities::builder().drop("ALL").build())
+                    .build(),
+            )
+            .build();
+        assert!(container_uses_new_fields(&cd));
+    }
+
+    #[test]
+    fn test_mount_points_trigger_containers_form() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .mount_points(
+                MountPoint::builder()
+                    .source_volume("data")
+                    .container_path("/data")
+                    .build(),
+            )
+            .build();
+        assert!(container_uses_new_fields(&cd));
+    }
 }
