@@ -3,7 +3,10 @@
   "title": "ecsctl Service Spec",
   "description": "Declarative service definition for ecsctl apply",
   "type": "object",
-  "required": ["metadata", "spec"],
+  "required": [
+    "metadata",
+    "spec"
+  ],
   "additionalProperties": false,
   "properties": {
     "apiVersion": {
@@ -16,7 +19,10 @@
     },
     "metadata": {
       "type": "object",
-      "required": ["name", "cluster"],
+      "required": [
+        "name",
+        "cluster"
+      ],
       "additionalProperties": false,
       "properties": {
         "name": {
@@ -31,7 +37,10 @@
     },
     "spec": {
       "type": "object",
-      "required": ["image", "cpu", "memory"],
+      "required": [
+        "cpu",
+        "memory"
+      ],
       "additionalProperties": false,
       "properties": {
         "image": {
@@ -40,23 +49,67 @@
         },
         "cpu": {
           "type": "string",
-          "enum": ["256", "512", "1024", "2048", "4096"],
+          "enum": [
+            "256",
+            "512",
+            "1024",
+            "2048",
+            "4096"
+          ],
           "description": "Task CPU units (256=0.25vCPU, 512=0.5, 1024=1, 2048=2, 4096=4)"
         },
         "memory": {
           "type": "string",
-          "enum": ["512", "1024", "2048", "3072", "4096", "5120", "6144", "7168", "8192", "9216", "10240", "11264", "12288", "13312", "14336", "15360", "16384", "17408", "18432", "19456", "20480", "21504", "22528", "23552", "24576", "25600", "26624", "27648", "28672", "29696", "30720"],
+          "enum": [
+            "512",
+            "1024",
+            "2048",
+            "3072",
+            "4096",
+            "5120",
+            "6144",
+            "7168",
+            "8192",
+            "9216",
+            "10240",
+            "11264",
+            "12288",
+            "13312",
+            "14336",
+            "15360",
+            "16384",
+            "17408",
+            "18432",
+            "19456",
+            "20480",
+            "21504",
+            "22528",
+            "23552",
+            "24576",
+            "25600",
+            "26624",
+            "27648",
+            "28672",
+            "29696",
+            "30720"
+          ],
           "description": "Task memory in MB (must be valid for chosen cpu)"
         },
         "arch": {
           "type": "string",
-          "enum": ["X86_64", "ARM64"],
+          "enum": [
+            "X86_64",
+            "ARM64"
+          ],
           "default": "X86_64",
           "description": "CPU architecture"
         },
         "capacity": {
           "type": "string",
-          "enum": ["FARGATE", "FARGATE_SPOT"],
+          "enum": [
+            "FARGATE",
+            "FARGATE_SPOT"
+          ],
           "default": "FARGATE",
           "description": "Capacity provider"
         },
@@ -85,7 +138,9 @@
         },
         "command": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Override container command (e.g. [\"sh\", \"-c\", \"exec ...\"])"
         },
         "executionRoleArn": {
@@ -100,12 +155,18 @@
         },
         "subnets": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^subnet-" },
+          "items": {
+            "type": "string",
+            "pattern": "^subnet-"
+          },
           "description": "VPC subnet IDs"
         },
         "securityGroups": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^sg-" },
+          "items": {
+            "type": "string",
+            "pattern": "^sg-"
+          },
           "description": "Security group IDs"
         },
         "assignPublicIp": {
@@ -119,12 +180,16 @@
         },
         "env": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "Environment variables (key: value)"
         },
         "secrets": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "Secrets from SSM/SecretsManager (key: ARN)"
         },
         "containers": {
@@ -132,30 +197,88 @@
           "description": "Multi-container task definition (sidecars). When present, image/port/command/entryPoint/env/secrets/logGroup/containerName at the spec level are ignored in favor of this list.",
           "items": {
             "type": "object",
-            "required": ["name", "image"],
+            "required": [
+              "name",
+              "image"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "description": "Container name (used by dependsOn and mountPoints)" },
-              "image": { "type": "string" },
-              "essential": { "type": "boolean", "default": true },
-              "port": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0 },
-              "command": { "type": "array", "items": { "type": "string" } },
-              "entryPoint": { "type": "array", "items": { "type": "string" }, "description": "Override the image's ENTRYPOINT" },
-              "env": { "type": "object", "additionalProperties": { "type": "string" } },
-              "secrets": { "type": "object", "additionalProperties": { "type": "string" } },
-              "logGroup": { "type": "string" },
-              "user": { "type": "string", "description": "Container user override, e.g. \"0\" for root or \"1000\" for a fixed uid" },
-              "readonlyRootFilesystem": { "type": "boolean", "default": false },
+              "name": {
+                "type": "string",
+                "description": "Container name (used by dependsOn and mountPoints)"
+              },
+              "image": {
+                "type": "string"
+              },
+              "essential": {
+                "type": "boolean",
+                "default": true
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "default": 0
+              },
+              "command": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "entryPoint": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Override the image's ENTRYPOINT"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "secrets": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "logGroup": {
+                "type": "string"
+              },
+              "user": {
+                "type": "string",
+                "description": "Container user override, e.g. \"0\" for root or \"1000\" for a fixed uid"
+              },
+              "readonlyRootFilesystem": {
+                "type": "boolean",
+                "default": false
+              },
               "dependsOn": {
                 "type": "array",
                 "description": "Startup ordering against other containers in this task. HEALTHY parses (so the tool can explain why it is refused rather than emitting a generic unknown-value error) but is rejected at validation time: it requires a healthCheck this schema cannot configure. SUCCESS/COMPLETE additionally require the *target* container (named in containerName) to have essential: false -- AWS rejects a SUCCESS/COMPLETE dependency on an essential container.",
                 "items": {
                   "type": "object",
-                  "required": ["containerName", "condition"],
+                  "required": [
+                    "containerName",
+                    "condition"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "containerName": { "type": "string" },
-                    "condition": { "type": "string", "enum": ["START", "SUCCESS", "COMPLETE", "HEALTHY"] }
+                    "containerName": {
+                      "type": "string"
+                    },
+                    "condition": {
+                      "type": "string",
+                      "enum": [
+                        "START",
+                        "SUCCESS",
+                        "COMPLETE",
+                        "HEALTHY"
+                      ]
+                    }
                   }
                 }
               },
@@ -165,7 +288,49 @@
                 "properties": {
                   "capabilitiesDrop": {
                     "type": "array",
-                    "items": { "type": "string", "enum": ["ALL", "AUDIT_CONTROL", "AUDIT_WRITE", "BLOCK_SUSPEND", "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID", "IPC_LOCK", "IPC_OWNER", "KILL", "LEASE", "LINUX_IMMUTABLE", "MAC_ADMIN", "MAC_OVERRIDE", "MKNOD", "NET_ADMIN", "NET_BIND_SERVICE", "NET_BROADCAST", "NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_ADMIN", "SYS_BOOT", "SYS_CHROOT", "SYS_MODULE", "SYS_NICE", "SYS_PACCT", "SYS_PTRACE", "SYS_RAWIO", "SYS_RESOURCE", "SYS_TIME", "SYS_TTY_CONFIG", "SYSLOG", "WAKE_ALARM"] },
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "ALL",
+                        "AUDIT_CONTROL",
+                        "AUDIT_WRITE",
+                        "BLOCK_SUSPEND",
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
+                        "FOWNER",
+                        "FSETID",
+                        "IPC_LOCK",
+                        "IPC_OWNER",
+                        "KILL",
+                        "LEASE",
+                        "LINUX_IMMUTABLE",
+                        "MAC_ADMIN",
+                        "MAC_OVERRIDE",
+                        "MKNOD",
+                        "NET_ADMIN",
+                        "NET_BIND_SERVICE",
+                        "NET_BROADCAST",
+                        "NET_RAW",
+                        "SETFCAP",
+                        "SETGID",
+                        "SETPCAP",
+                        "SETUID",
+                        "SYS_ADMIN",
+                        "SYS_BOOT",
+                        "SYS_CHROOT",
+                        "SYS_MODULE",
+                        "SYS_NICE",
+                        "SYS_PACCT",
+                        "SYS_PTRACE",
+                        "SYS_RAWIO",
+                        "SYS_RESOURCE",
+                        "SYS_TIME",
+                        "SYS_TTY_CONFIG",
+                        "SYSLOG",
+                        "WAKE_ALARM"
+                      ]
+                    },
                     "description": "Linux capabilities to drop, validated against the ECS-accepted set"
                   }
                 }
@@ -175,14 +340,23 @@
                 "description": "containerPath -> sourceVolume. Value is either the volume name (read-write) or an object with sourceVolume and readOnly.",
                 "additionalProperties": {
                   "oneOf": [
-                    { "type": "string" },
+                    {
+                      "type": "string"
+                    },
                     {
                       "type": "object",
-                      "required": ["sourceVolume"],
+                      "required": [
+                        "sourceVolume"
+                      ],
                       "additionalProperties": false,
                       "properties": {
-                        "sourceVolume": { "type": "string" },
-                        "readOnly": { "type": "boolean", "default": false }
+                        "sourceVolume": {
+                          "type": "string"
+                        },
+                        "readOnly": {
+                          "type": "boolean",
+                          "default": false
+                        }
                       }
                     }
                   ]
@@ -196,27 +370,71 @@
           "description": "Task-level volumes, referenced by name from each container's mountPoints. Omit efs for ephemeral ECS-managed scratch storage. EBS (configuredAtLaunch) is deliberately unsupported: the task definition flag is only half of an attachment and this tool does not send volumeConfigurations on Create/UpdateService.",
           "items": {
             "type": "object",
-            "required": ["name"],
+            "required": [
+              "name"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string" },
+              "name": {
+                "type": "string"
+              },
               "efs": {
                 "type": "object",
-                "required": ["fileSystemId"],
+                "required": [
+                  "fileSystemId"
+                ],
                 "additionalProperties": false,
                 "description": "EFS is the only non-ephemeral volume type usable on Fargate; host and Docker volumes are EC2-only",
                 "properties": {
-                  "fileSystemId": { "type": "string" },
-                  "rootDirectory": { "type": "string" },
-                  "transitEncryption": { "type": "string", "enum": ["ENABLED", "DISABLED"] },
-                  "accessPointId": { "type": "string" },
-                  "iam": { "type": "string", "enum": ["ENABLED", "DISABLED"] }
+                  "fileSystemId": {
+                    "type": "string"
+                  },
+                  "rootDirectory": {
+                    "type": "string"
+                  },
+                  "transitEncryption": {
+                    "type": "string",
+                    "enum": [
+                      "ENABLED",
+                      "DISABLED"
+                    ]
+                  },
+                  "accessPointId": {
+                    "type": "string"
+                  },
+                  "iam": {
+                    "type": "string",
+                    "enum": [
+                      "ENABLED",
+                      "DISABLED"
+                    ]
+                  }
                 }
               }
             }
           }
         }
-      }
+      },
+      "oneOf": [
+        {
+          "title": "single-container",
+          "required": [
+            "image"
+          ],
+          "not": {
+            "required": [
+              "containers"
+            ]
+          }
+        },
+        {
+          "title": "multi-container (sidecars)",
+          "required": [
+            "containers"
+          ]
+        }
+      ],
+      "description": "Either single-container mode (spec.image plus the flat port/command/env/secrets/logGroup fields) or multi-container mode (spec.containers[]), not both: when containers is present the flat container fields are ignored."
     }
   }
 }

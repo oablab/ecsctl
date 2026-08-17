@@ -14,3 +14,12 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+      # The schema and the Rust types are maintained by hand with nothing
+      # connecting them, and they drifted once: spec.required listed "image"
+      # while ServiceSpec defaulted it, so every multi-container spec was
+      # rejected by the schema and accepted by the parser, with cargo test
+      # green throughout. This asserts both directions on representative specs.
+      - name: Validate example specs against the JSON schema
+        run: |
+          python3 -m pip install --quiet jsonschema pyyaml
+          python3 tests/schema_examples.py

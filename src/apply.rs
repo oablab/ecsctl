@@ -399,6 +399,42 @@ impl ServiceSpec {
             anyhow::bail!("desiredCount must be >= 0");
         }
 
+        // When containers[] is present the flat container fields are ignored by
+        // the write path. Silently ignoring them is how someone migrating from
+        // single-container mode loses every environment variable: they add
+        // containers[] and leave spec.env in place, apply succeeds, and the
+        // variables are simply gone. Refuse instead of dropping.
+        if spec.containers.is_some() {
+            let mut ignored: Vec<&str> = Vec::new();
+            if !spec.image.is_empty() {
+                ignored.push("image");
+            }
+            if spec.port != 0 {
+                ignored.push("port");
+            }
+            if spec.command.is_some() {
+                ignored.push("command");
+            }
+            if !spec.env.is_empty() {
+                ignored.push("env");
+            }
+            if !spec.secrets.is_empty() {
+                ignored.push("secrets");
+            }
+            if spec.log_group.is_some() {
+                ignored.push("logGroup");
+            }
+            if spec.container_name.is_some() {
+                ignored.push("containerName");
+            }
+            if !ignored.is_empty() {
+                anyhow::bail!(
+                    "spec.containers is set, so the spec-level container fields ({}) are not used -- move them into the relevant entry under spec.containers rather than leaving them here, where they would be silently dropped",
+                    ignored.join(", ")
+                );
+            }
+        }
+
         // Volume checks run outside the `containers` branch on purpose: volumes
         // are registered in single-container mode too, where nothing mounts
         // them. Keeping these inside the branch meant a single-container spec
@@ -1865,6 +1901,55 @@ spec:
     let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
     let err = spec.validate().unwrap_err().to_string();
     assert!(err.contains("mounted nowhere"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_spec_level_fields_alongside_containers() {
+    // Silently ignoring these is how a migration from single-container mode
+    // loses every environment variable: add containers[], leave spec.env in
+    // place, apply succeeds, variables gone.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: migrating
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  env:
+    API_KEY: shh
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("env"), "error was: {err}");
+    assert!(err.contains("spec.containers"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_accepts_containers_without_spec_level_fields() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: clean
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      env:
+        API_KEY: shh
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_ok());
 }
 
 #[cfg(test)]
