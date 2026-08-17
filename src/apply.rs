@@ -319,7 +319,7 @@ pub struct Spec {
     /// Task-level volumes, referenced by name from each container's
     /// `mountPoints`. Ephemeral ECS-managed scratch by default; set `efs` for a
     /// persistent EFS file system.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeSpec>,
 }
 

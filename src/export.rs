@@ -18,6 +18,150 @@ fn container_uses_new_fields(cd: &aws_sdk_ecs::types::ContainerDefinition) -> bo
         || !cd.mount_points().is_empty()
 }
 
+/// Convert one ECS container definition into a `ContainerSpec`.
+///
+/// One function rather than three hand-copied blocks. The previous shape had
+/// this mapping duplicated across the multi-container loop, the
+/// single-container-with-new-fields branch, and the flat branch, which is the
+/// drift that produced this PR's original export bug (new fields added to one
+/// branch only) and contributed to the `containerName` round-trip break. Any
+/// future field is now added once, and every export path shares the same
+/// lossless-or-refuse policy.
+fn container_to_spec(
+    cd: &aws_sdk_ecs::types::ContainerDefinition,
+) -> Result<crate::apply::ContainerSpec> {
+    let name = cd.name().unwrap_or("app").to_string();
+
+    let mut env: HashMap<String, String> = HashMap::new();
+    for kv in cd.environment() {
+        if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
+            env.insert(k.to_string(), v.to_string());
+        }
+    }
+
+    let mut secrets: HashMap<String, String> = HashMap::new();
+    for sec in cd.secrets() {
+        secrets.insert(sec.name().to_string(), sec.value_from().to_string());
+    }
+
+    let log_group = cd
+        .log_configuration()
+        .and_then(|lc| lc.options())
+        .and_then(|opts| opts.get("awslogs-group"))
+        .map(|s| s.to_string());
+
+    let port = cd
+        .port_mappings()
+        .first()
+        .map(|p| p.container_port().unwrap_or(0) as u16)
+        .unwrap_or(0);
+
+    let vec_or_none = |v: &[String]| -> Option<Vec<String>> {
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.to_vec())
+        }
+    };
+
+    let mut depends_on: Vec<crate::apply::DependsOn> = Vec::new();
+    for d in cd.depends_on() {
+        // An externally created task definition can legally use HEALTHY, which
+        // this spec parses but refuses on apply. Carrying it through would emit
+        // a spec that cannot be reapplied, so it is dropped -- but loudly:
+        // dropping a startup-ordering constraint in silence is how an app
+        // container ends up running before its dependency is ready.
+        let condition = match d.condition() {
+            aws_sdk_ecs::types::ContainerCondition::Start => {
+                crate::apply::DependsOnCondition::Start
+            }
+            aws_sdk_ecs::types::ContainerCondition::Success => {
+                crate::apply::DependsOnCondition::Success
+            }
+            aws_sdk_ecs::types::ContainerCondition::Complete => {
+                crate::apply::DependsOnCondition::Complete
+            }
+            other => {
+                eprintln!(
+                    "  \u{26a0}\u{fe0f}  dropping dependsOn {} -> {} (condition {}): not representable in this spec, so the exported YAML does not preserve that startup ordering",
+                    name,
+                    d.container_name(),
+                    other.as_str()
+                );
+                continue;
+            }
+        };
+        depends_on.push(crate::apply::DependsOn {
+            container_name: d.container_name().to_string(),
+            condition,
+        });
+    }
+
+    let linux_parameters = match cd.linux_parameters().and_then(|lp| lp.capabilities()) {
+        None => None,
+        Some(c) => {
+            if !c.add().is_empty() {
+                anyhow::bail!(
+                    "container '{}' adds Linux capabilities ({}), which this spec cannot represent. Export refused rather than silently dropping them",
+                    name,
+                    c.add().join(", ")
+                );
+            }
+            // apply's validate() hard-rejects anything outside its known
+            // capability list, so exporting a name it does not know would
+            // produce a spec that fails on reapply with a "typo" error naming a
+            // value the user never typed.
+            for cap in c.drop() {
+                if !crate::apply::is_known_capability(cap) {
+                    anyhow::bail!(
+                        "container '{}' drops Linux capability '{}', which this spec's validation does not recognise. Export refused rather than emitting a spec that cannot be reapplied",
+                        name,
+                        cap
+                    );
+                }
+            }
+            Some(crate::apply::LinuxParameters {
+                capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
+            })
+        }
+    };
+
+    let mut mount_points: std::collections::BTreeMap<String, crate::apply::MountPointSpec> =
+        std::collections::BTreeMap::new();
+    for mp in cd.mount_points() {
+        if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
+            // Preserve readOnly. Dropping it silently turned a read-only mount
+            // into a writable one on reapply.
+            let spec = if mp.read_only().unwrap_or(false) {
+                crate::apply::MountPointSpec::Detailed(crate::apply::DetailedMountPoint {
+                    source_volume: sv.to_string(),
+                    read_only: true,
+                })
+            } else {
+                crate::apply::MountPointSpec::Volume(sv.to_string())
+            };
+            mount_points.insert(cp.to_string(), spec);
+        }
+    }
+
+    Ok(crate::apply::ContainerSpec {
+        name,
+        image: cd.image().unwrap_or("?").to_string(),
+        essential: cd.essential().unwrap_or(true),
+        port,
+        command: vec_or_none(cd.command()),
+        entry_point: vec_or_none(cd.entry_point()),
+        env,
+        secrets,
+        log_group,
+        user: cd.user().map(|s| s.to_string()),
+        readonly_root_filesystem: cd.readonly_root_filesystem().unwrap_or(false),
+        depends_on,
+        linux_parameters,
+        mount_points,
+    })
+}
+
 pub async fn run(
     config: &aws_config::SdkConfig,
     cfg: &Config,
@@ -220,145 +364,7 @@ async fn build_spec(
             // Multi-container: export as containers array
             let mut cs_vec = Vec::new();
             for cd in &app_containers {
-                let mut env_map: HashMap<String, String> = HashMap::new();
-                for kv in cd.environment() {
-                    if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
-                        env_map.insert(k.to_string(), v.to_string());
-                    }
-                }
-                let mut sec_map: HashMap<String, String> = HashMap::new();
-                for s in cd.secrets() {
-                    sec_map.insert(s.name().to_string(), s.value_from().to_string());
-                }
-                let lg = cd
-                    .log_configuration()
-                    .and_then(|lc| lc.options())
-                    .and_then(|opts| opts.get("awslogs-group"))
-                    .map(|s| s.to_string());
-                let p = cd
-                    .port_mappings()
-                    .first()
-                    .map(|p| p.container_port().unwrap_or(0) as u16)
-                    .unwrap_or(0);
-                let cmd: Option<Vec<String>> = {
-                    let cmds = cd.command();
-                    if cmds.is_empty() {
-                        None
-                    } else {
-                        Some(cmds.iter().map(|s| s.to_string()).collect())
-                    }
-                };
-                let entry_point: Option<Vec<String>> = {
-                    let eps = cd.entry_point();
-                    if eps.is_empty() {
-                        None
-                    } else {
-                        Some(eps.iter().map(|s| s.to_string()).collect())
-                    }
-                };
-                let depends_on: Vec<crate::apply::DependsOn> = cd
-                    .depends_on()
-                    .iter()
-                    .filter_map(|d| {
-                        // An externally created task definition can legally use
-                        // HEALTHY, which this spec parses but refuses on apply.
-                        // Carrying it through would produce a spec that cannot
-                        // be reapplied, so it is dropped -- but loudly: dropping
-                        // a startup-ordering constraint in silence is how an app
-                        // container ends up running before its dependency is
-                        // ready.
-                        let condition = match d.condition() {
-                            aws_sdk_ecs::types::ContainerCondition::Start => {
-                                crate::apply::DependsOnCondition::Start
-                            }
-                            aws_sdk_ecs::types::ContainerCondition::Success => {
-                                crate::apply::DependsOnCondition::Success
-                            }
-                            aws_sdk_ecs::types::ContainerCondition::Complete => {
-                                crate::apply::DependsOnCondition::Complete
-                            }
-                            other => {
-                                eprintln!(
-                                    "  \u{26a0}\u{fe0f}  dropping dependsOn {} -> {} (condition {}): not representable in this spec, so the exported YAML does not preserve that startup ordering",
-                                    cd.name().unwrap_or("?"),
-                                    d.container_name(),
-                                    other.as_str()
-                                );
-                                return None;
-                            }
-                        };
-                        Some(crate::apply::DependsOn {
-                            container_name: d.container_name().to_string(),
-                            condition,
-                        })
-                    })
-                    .collect();
-                let linux_parameters = match cd.linux_parameters().and_then(|lp| lp.capabilities())
-                {
-                    None => None,
-                    Some(c) => {
-                        if !c.add().is_empty() {
-                            anyhow::bail!(
-                                "container '{}' adds Linux capabilities ({}), which this spec cannot represent. Export refused rather than silently dropping them",
-                                cd.name().unwrap_or("?"),
-                                c.add().join(", ")
-                            );
-                        }
-                        // apply's validate() hard-rejects anything outside its
-                        // known capability list, so exporting a name it does not
-                        // know would produce a spec that fails on reapply with a
-                        // "typo" error naming a value the user never typed.
-                        for cap in c.drop() {
-                            if !crate::apply::is_known_capability(cap) {
-                                anyhow::bail!(
-                                    "container '{}' drops Linux capability '{}', which this spec's validation does not recognise. Export refused rather than emitting a spec that cannot be reapplied",
-                                    cd.name().unwrap_or("?"),
-                                    cap
-                                );
-                            }
-                        }
-                        Some(crate::apply::LinuxParameters {
-                            capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
-                        })
-                    }
-                };
-                let mut mount_points: std::collections::BTreeMap<
-                    String,
-                    crate::apply::MountPointSpec,
-                > = std::collections::BTreeMap::new();
-                for mp in cd.mount_points() {
-                    if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
-                        // Preserve readOnly. Dropping it silently turned a
-                        // read-only mount into a writable one on reapply.
-                        let spec = if mp.read_only().unwrap_or(false) {
-                            crate::apply::MountPointSpec::Detailed(
-                                crate::apply::DetailedMountPoint {
-                                    source_volume: sv.to_string(),
-                                    read_only: true,
-                                },
-                            )
-                        } else {
-                            crate::apply::MountPointSpec::Volume(sv.to_string())
-                        };
-                        mount_points.insert(cp.to_string(), spec);
-                    }
-                }
-                cs_vec.push(crate::apply::ContainerSpec {
-                    name: cd.name().unwrap_or("app").to_string(),
-                    image: cd.image().unwrap_or("?").to_string(),
-                    essential: cd.essential().unwrap_or(true),
-                    port: p,
-                    command: cmd,
-                    entry_point,
-                    env: env_map,
-                    secrets: sec_map,
-                    log_group: lg,
-                    user: cd.user().map(|s| s.to_string()),
-                    readonly_root_filesystem: cd.readonly_root_filesystem().unwrap_or(false),
-                    depends_on,
-                    linux_parameters,
-                    mount_points,
-                });
+                cs_vec.push(container_to_spec(cd)?);
             }
             (
                 String::new(),
@@ -389,145 +395,7 @@ async fn build_spec(
             let uses_new_fields = container_uses_new_fields(cd);
 
             if uses_new_fields {
-                let mut env_map: HashMap<String, String> = HashMap::new();
-                for kv in cd.environment() {
-                    if let (Some(k), Some(v)) = (kv.name(), kv.value()) {
-                        env_map.insert(k.to_string(), v.to_string());
-                    }
-                }
-                let mut sec_map: HashMap<String, String> = HashMap::new();
-                for s in cd.secrets() {
-                    sec_map.insert(s.name().to_string(), s.value_from().to_string());
-                }
-                let lg = cd
-                    .log_configuration()
-                    .and_then(|lc| lc.options())
-                    .and_then(|opts| opts.get("awslogs-group"))
-                    .map(|s| s.to_string());
-                let p = cd
-                    .port_mappings()
-                    .first()
-                    .map(|p| p.container_port().unwrap_or(0) as u16)
-                    .unwrap_or(0);
-                let cmd: Option<Vec<String>> = {
-                    let cmds = cd.command();
-                    if cmds.is_empty() {
-                        None
-                    } else {
-                        Some(cmds.iter().map(|s| s.to_string()).collect())
-                    }
-                };
-                let entry_point: Option<Vec<String>> = {
-                    let eps = cd.entry_point();
-                    if eps.is_empty() {
-                        None
-                    } else {
-                        Some(eps.iter().map(|s| s.to_string()).collect())
-                    }
-                };
-                let depends_on: Vec<crate::apply::DependsOn> = cd
-                    .depends_on()
-                    .iter()
-                    .filter_map(|d| {
-                        // An externally created task definition can legally use
-                        // HEALTHY, which this spec parses but refuses on apply.
-                        // Carrying it through would produce a spec that cannot
-                        // be reapplied, so it is dropped -- but loudly: dropping
-                        // a startup-ordering constraint in silence is how an app
-                        // container ends up running before its dependency is
-                        // ready.
-                        let condition = match d.condition() {
-                            aws_sdk_ecs::types::ContainerCondition::Start => {
-                                crate::apply::DependsOnCondition::Start
-                            }
-                            aws_sdk_ecs::types::ContainerCondition::Success => {
-                                crate::apply::DependsOnCondition::Success
-                            }
-                            aws_sdk_ecs::types::ContainerCondition::Complete => {
-                                crate::apply::DependsOnCondition::Complete
-                            }
-                            other => {
-                                eprintln!(
-                                    "  \u{26a0}\u{fe0f}  dropping dependsOn {} -> {} (condition {}): not representable in this spec, so the exported YAML does not preserve that startup ordering",
-                                    cd.name().unwrap_or("?"),
-                                    d.container_name(),
-                                    other.as_str()
-                                );
-                                return None;
-                            }
-                        };
-                        Some(crate::apply::DependsOn {
-                            container_name: d.container_name().to_string(),
-                            condition,
-                        })
-                    })
-                    .collect();
-                let linux_parameters = match cd.linux_parameters().and_then(|lp| lp.capabilities())
-                {
-                    None => None,
-                    Some(c) => {
-                        if !c.add().is_empty() {
-                            anyhow::bail!(
-                                "container '{}' adds Linux capabilities ({}), which this spec cannot represent. Export refused rather than silently dropping them",
-                                cd.name().unwrap_or("?"),
-                                c.add().join(", ")
-                            );
-                        }
-                        // apply's validate() hard-rejects anything outside its
-                        // known capability list, so exporting a name it does not
-                        // know would produce a spec that fails on reapply with a
-                        // "typo" error naming a value the user never typed.
-                        for cap in c.drop() {
-                            if !crate::apply::is_known_capability(cap) {
-                                anyhow::bail!(
-                                    "container '{}' drops Linux capability '{}', which this spec's validation does not recognise. Export refused rather than emitting a spec that cannot be reapplied",
-                                    cd.name().unwrap_or("?"),
-                                    cap
-                                );
-                            }
-                        }
-                        Some(crate::apply::LinuxParameters {
-                            capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
-                        })
-                    }
-                };
-                let mut mount_points: std::collections::BTreeMap<
-                    String,
-                    crate::apply::MountPointSpec,
-                > = std::collections::BTreeMap::new();
-                for mp in cd.mount_points() {
-                    if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
-                        // Preserve readOnly. Dropping it silently turned a
-                        // read-only mount into a writable one on reapply.
-                        let spec = if mp.read_only().unwrap_or(false) {
-                            crate::apply::MountPointSpec::Detailed(
-                                crate::apply::DetailedMountPoint {
-                                    source_volume: sv.to_string(),
-                                    read_only: true,
-                                },
-                            )
-                        } else {
-                            crate::apply::MountPointSpec::Volume(sv.to_string())
-                        };
-                        mount_points.insert(cp.to_string(), spec);
-                    }
-                }
-                let cs = crate::apply::ContainerSpec {
-                    name: cd.name().unwrap_or("app").to_string(),
-                    image: cd.image().unwrap_or("?").to_string(),
-                    essential: cd.essential().unwrap_or(true),
-                    port: p,
-                    command: cmd,
-                    entry_point,
-                    env: env_map,
-                    secrets: sec_map,
-                    log_group: lg,
-                    user: cd.user().map(|s| s.to_string()),
-                    readonly_root_filesystem: cd.readonly_root_filesystem().unwrap_or(false),
-                    depends_on,
-                    linux_parameters,
-                    mount_points,
-                };
+                let cs = container_to_spec(cd)?;
                 (
                     String::new(),
                     "app".to_string(),
@@ -719,6 +587,160 @@ mod tests {
             )
             .build();
         assert!(container_uses_new_fields(&cd));
+    }
+
+    /// The gap that let three separate round-trip breaks ship with green CI:
+    /// nothing built an exported spec and ran it back through validate(). This
+    /// closes it without an AWS client -- ContainerDefinition::builder() and
+    /// ServiceSpec::validate() are both pure.
+    #[test]
+    fn exported_container_spec_round_trips_through_validate() {
+        let init = ContainerDefinition::builder()
+            .name("init-perms")
+            .image("app:latest")
+            .essential(false)
+            .user("0")
+            .entry_point("/bin/sh".to_string())
+            .entry_point("-c".to_string())
+            .command("chown 1000:1000 /workspace".to_string())
+            .mount_points(
+                MountPoint::builder()
+                    .source_volume("workspace")
+                    .container_path("/workspace")
+                    .build(),
+            )
+            .build();
+
+        let app = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .essential(true)
+            .user("1000")
+            .readonly_root_filesystem(true)
+            .depends_on(
+                ContainerDependency::builder()
+                    .container_name("init-perms")
+                    .condition(ContainerCondition::Success)
+                    .build()
+                    .unwrap(),
+            )
+            .linux_parameters(
+                LinuxParameters::builder()
+                    .capabilities(KernelCapabilities::builder().drop("ALL").build())
+                    .build(),
+            )
+            .mount_points(
+                MountPoint::builder()
+                    .source_volume("workspace")
+                    .container_path("/workspace")
+                    .read_only(true)
+                    .build(),
+            )
+            .build();
+
+        let containers = vec![
+            container_to_spec(&init).expect("init container should convert"),
+            container_to_spec(&app).expect("app container should convert"),
+        ];
+
+        // Assemble the spec the way build_spec does for a multi-container
+        // service, then round-trip it: serialise, parse back, validate.
+        let spec = crate::apply::ServiceSpec {
+            api_version: Some("ecsctl/v1".to_string()),
+            kind: Some("Service".to_string()),
+            metadata: crate::apply::Metadata {
+                name: "svc".to_string(),
+                cluster: "cl".to_string(),
+            },
+            spec: crate::apply::Spec {
+                image: String::new(),
+                cpu: "1024".to_string(),
+                memory: "2048".to_string(),
+                arch: "X86_64".to_string(),
+                capacity: "FARGATE".to_string(),
+                desired_count: 1,
+                exec_enabled: false,
+                env: HashMap::new(),
+                secrets: HashMap::new(),
+                log_group: None,
+                execution_role_arn: None,
+                task_role_arn: None,
+                subnets: None,
+                security_groups: None,
+                assign_public_ip: false,
+                container_name: None,
+                port: 0,
+                command: None,
+                containers: Some(containers),
+                volumes: vec![crate::apply::VolumeSpec {
+                    name: "workspace".to_string(),
+                    efs: None,
+                }],
+            },
+        };
+
+        let yaml = serde_yaml::to_string(&spec).expect("exported spec should serialise");
+        let reparsed: crate::apply::ServiceSpec =
+            serde_yaml::from_str(&yaml).expect("exported spec should parse back");
+        reparsed
+            .validate()
+            .expect("an exported spec must be one apply accepts");
+
+        // And the security-relevant details must survive the trip.
+        let out = reparsed.spec.containers.as_ref().unwrap();
+        let app_out = out.iter().find(|c| c.name == "app").unwrap();
+        assert_eq!(app_out.user.as_deref(), Some("1000"));
+        assert!(app_out.readonly_root_filesystem);
+        assert_eq!(
+            app_out.linux_parameters.as_ref().unwrap().capabilities_drop,
+            vec!["ALL".to_string()]
+        );
+        assert_eq!(app_out.depends_on[0].container_name, "init-perms");
+        assert!(
+            app_out.mount_points.get("/workspace").unwrap().read_only(),
+            "readOnly must survive export"
+        );
+    }
+
+    #[test]
+    fn healthy_condition_is_dropped_not_carried_into_an_unappliable_spec() {
+        // Policy pinned by test: apply refuses HEALTHY, so export must not emit
+        // it. Without this, a future change could carry it through and every
+        // export of such a service would produce a spec that fails on reapply.
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .essential(true)
+            .depends_on(
+                ContainerDependency::builder()
+                    .container_name("sidecar")
+                    .condition(ContainerCondition::Healthy)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        let spec = container_to_spec(&cd).expect("should convert, dropping the condition");
+        assert!(
+            spec.depends_on.is_empty(),
+            "HEALTHY must be dropped rather than emitted as something apply rejects"
+        );
+    }
+
+    #[test]
+    fn added_capabilities_refuse_the_export() {
+        let cd = ContainerDefinition::builder()
+            .name("app")
+            .image("app:latest")
+            .linux_parameters(
+                LinuxParameters::builder()
+                    .capabilities(KernelCapabilities::builder().add("SYS_PTRACE").build())
+                    .build(),
+            )
+            .build();
+        assert!(
+            container_to_spec(&cd).is_err(),
+            "capabilities.add is not representable, so export must refuse rather than drop it"
+        );
     }
 
     #[test]
