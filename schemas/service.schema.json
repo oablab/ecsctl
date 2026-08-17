@@ -193,14 +193,13 @@
         },
         "volumes": {
           "type": "array",
-          "description": "Task-level volumes, referenced by name from each container's mountPoints. Omit efs for ephemeral ECS-managed scratch storage.",
+          "description": "Task-level volumes, referenced by name from each container's mountPoints. Omit efs for ephemeral ECS-managed scratch storage. EBS (configuredAtLaunch) is deliberately unsupported: the task definition flag is only half of an attachment and this tool does not send volumeConfigurations on Create/UpdateService.",
           "items": {
             "type": "object",
             "required": ["name"],
             "additionalProperties": false,
             "properties": {
               "name": { "type": "string" },
-              "configuredAtLaunch": { "type": "boolean", "default": false, "description": "Defer volume configuration to launch time; required for attaching an EBS volume" },
               "efs": {
                 "type": "object",
                 "required": ["fileSystemId"],

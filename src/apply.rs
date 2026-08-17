@@ -106,6 +106,12 @@ const VALID_CAPABILITIES: &[&str] = &[
     "WAKE_ALARM",
 ];
 
+/// Whether a capability name is one ECS accepts. Exposed so export can refuse
+/// to emit a spec that apply's own validation would then reject.
+pub fn is_known_capability(cap: &str) -> bool {
+    VALID_CAPABILITIES.contains(&cap)
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LinuxParameters {
@@ -126,29 +132,39 @@ pub struct LinuxParameters {
 ///     readOnly: true
 /// ```
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DetailedMountPoint {
+    pub source_volume: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum MountPointSpec {
     Volume(String),
-    Detailed {
-        #[serde(rename = "sourceVolume")]
-        source_volume: String,
-        #[serde(default, rename = "readOnly")]
-        read_only: bool,
-    },
+    // A named struct rather than an inline struct variant, because
+    // deny_unknown_fields is a container attribute with nowhere to live on an
+    // inline variant -- serde routes unrecognised keys to __ignore instead.
+    // Without it, `readonly: true` (wrong case) parsed as read_only: false and
+    // registered a writable mount while reporting success: the same silent
+    // loss of a read-only mount that this commit fixes on the export side,
+    // arrived at from the input side.
+    Detailed(DetailedMountPoint),
 }
 
 impl MountPointSpec {
     pub fn source_volume(&self) -> &str {
         match self {
             Self::Volume(v) => v,
-            Self::Detailed { source_volume, .. } => source_volume,
+            Self::Detailed(d) => &d.source_volume,
         }
     }
 
     pub fn read_only(&self) -> bool {
         match self {
             Self::Volume(_) => false,
-            Self::Detailed { read_only, .. } => *read_only,
+            Self::Detailed(d) => d.read_only,
         }
     }
 }
@@ -209,6 +225,26 @@ fn default_essential() -> bool {
 /// EC2-only, and this tool registers Fargate task definitions), so it is the
 /// only one modelled here. Anything else found while exporting is refused
 /// loudly rather than silently flattened to an empty scratch volume.
+/// ENABLED/DISABLED, typed rather than a free-form String for the same reason
+/// DependsOnCondition is: an unvalidated `enabled` or `ENABLD` otherwise reaches
+/// AWS as an SDK Unknown variant and returns a ValidationException naming the
+/// request rather than the value.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EfsToggle {
+    Enabled,
+    Disabled,
+}
+
+impl EfsToggle {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "ENABLED",
+            Self::Disabled => "DISABLED",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EfsVolumeSpec {
@@ -216,11 +252,11 @@ pub struct EfsVolumeSpec {
     #[serde(default)]
     pub root_directory: Option<String>,
     #[serde(default)]
-    pub transit_encryption: Option<String>,
+    pub transit_encryption: Option<EfsToggle>,
     #[serde(default)]
     pub access_point_id: Option<String>,
     #[serde(default)]
-    pub iam: Option<String>,
+    pub iam: Option<EfsToggle>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -228,11 +264,16 @@ pub struct EfsVolumeSpec {
 pub struct VolumeSpec {
     pub name: String,
     /// Omitted for an ephemeral, ECS-managed scratch volume.
+    ///
+    /// Deliberately no `configuredAtLaunch`/EBS support: setting that flag on
+    /// the task definition is only half of attaching an EBS volume -- the other
+    /// half is `volumeConfigurations` on CreateService/UpdateService, which this
+    /// tool does not send. Accepting the flag would register a task definition
+    /// that claims a volume is configured at launch and then never supply it,
+    /// producing tasks with no volume where the application expects one, with no
+    /// error. Export refuses such a task definition instead (see export.rs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub efs: Option<EfsVolumeSpec>,
-    /// Deferred configuration at launch, required for attaching an EBS volume.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub configured_at_launch: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -269,8 +310,9 @@ pub struct Spec {
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub containers: Option<Vec<ContainerSpec>>,
-    /// Task-level shared volumes (ephemeral, ECS-managed — not EFS or host path).
-    /// Referenced by name from each container's `mountPoints`.
+    /// Task-level volumes, referenced by name from each container's
+    /// `mountPoints`. Ephemeral ECS-managed scratch by default; set `efs` for a
+    /// persistent EFS file system.
     #[serde(default)]
     pub volumes: Vec<VolumeSpec>,
 }
@@ -357,6 +399,51 @@ impl ServiceSpec {
             anyhow::bail!("desiredCount must be >= 0");
         }
 
+        // Volume checks run outside the `containers` branch on purpose: volumes
+        // are registered in single-container mode too, where nothing mounts
+        // them. Keeping these inside the branch meant a single-container spec
+        // could declare an EFS file system that was attached to the task
+        // definition and mounted nowhere -- apply reported success and the
+        // application wrote to container-local storage.
+        {
+            let mut seen = std::collections::HashSet::with_capacity(spec.volumes.len());
+            for vol in &spec.volumes {
+                if !seen.insert(vol.name.as_str()) {
+                    anyhow::bail!(
+                        "volume name '{}' is used by more than one entry in spec.volumes",
+                        vol.name
+                    );
+                }
+                if let Some(ref efs) = vol.efs {
+                    // Checked against the ECS API reference rather than assumed.
+                    if efs.iam == Some(EfsToggle::Enabled)
+                        && efs.transit_encryption != Some(EfsToggle::Enabled)
+                    {
+                        anyhow::bail!(
+                            "volume '{}' sets efs.iam: ENABLED, which requires efs.transitEncryption: ENABLED (\"Transit encryption must be turned on if Amazon EFS IAM authorization is used\")",
+                            vol.name
+                        );
+                    }
+                    if efs.access_point_id.is_some() {
+                        match efs.root_directory.as_deref() {
+                            None | Some("/") => {}
+                            Some(rd) => anyhow::bail!(
+                                "volume '{}' sets both efs.accessPointId and efs.rootDirectory '{}': when an access point is used, rootDirectory must be omitted or '/', because the access point enforces its own path",
+                                vol.name,
+                                rd
+                            ),
+                        }
+                    }
+                }
+            }
+
+            if spec.containers.is_none() && spec.volumes.iter().any(|v| v.efs.is_some()) {
+                anyhow::bail!(
+                    "spec.volumes declares an EFS volume but spec.containers is absent: single-container mode has no mountPoints field, so the file system would be attached to the task definition and mounted nowhere. Use spec.containers[] to declare the mount"
+                );
+            }
+        }
+
         // Validate multi-container cross-references and dependsOn conditions
         // locally, before anything is sent to AWS. Each of these previously
         // parsed and validated cleanly, then failed at RegisterTaskDefinition
@@ -378,21 +465,6 @@ impl ServiceSpec {
                         anyhow::bail!(
                             "container name '{}' is used by more than one entry in spec.containers",
                             cs.name
-                        );
-                    }
-                }
-            }
-
-            // Same check for volumes: a duplicate name means mountPoints
-            // referencing it resolve ambiguously, and AWS's own error would
-            // not explain why.
-            {
-                let mut seen = std::collections::HashSet::with_capacity(spec.volumes.len());
-                for vol in &spec.volumes {
-                    if !seen.insert(vol.name.as_str()) {
-                        anyhow::bail!(
-                            "volume name '{}' is used by more than one entry in spec.volumes",
-                            vol.name
                         );
                     }
                 }
@@ -824,16 +896,13 @@ pub async fn run_from_string(
     if !spec.spec.volumes.is_empty() {
         for vol in &spec.spec.volumes {
             let mut vb = aws_sdk_ecs::types::Volume::builder().name(&vol.name);
-            if vol.configured_at_launch {
-                vb = vb.configured_at_launch(true);
-            }
             if let Some(ref efs) = vol.efs {
                 let mut eb = aws_sdk_ecs::types::EfsVolumeConfiguration::builder()
                     .file_system_id(&efs.file_system_id);
                 if let Some(ref rd) = efs.root_directory {
                     eb = eb.root_directory(rd);
                 }
-                if let Some(ref te) = efs.transit_encryption {
+                if let Some(te) = efs.transit_encryption {
                     eb = eb.transit_encryption(te.as_str().into());
                 }
                 if efs.access_point_id.is_some() || efs.iam.is_some() {
@@ -841,7 +910,7 @@ pub async fn run_from_string(
                     if let Some(ref ap) = efs.access_point_id {
                         ab = ab.access_point_id(ap);
                     }
-                    if let Some(ref iam) = efs.iam {
+                    if let Some(iam) = efs.iam {
                         ab = ab.iam(iam.as_str().into());
                     }
                     eb = eb.authorization_config(ab.build());
@@ -1484,8 +1553,9 @@ spec:
     let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
     let err = spec.validate().unwrap_err().to_string();
     assert!(err.contains("cycle"), "error was: {err}");
-    // The message should name the actual loop, not just assert one exists.
-    assert!(err.contains("a") && err.contains("b"), "error was: {err}");
+    // Assert the actual loop, not just that some letter appears -- a bare
+    // contains("a") is satisfied by the word "any" in the error text.
+    assert!(err.contains("a -> b -> a"), "error was: {err}");
 }
 
 #[test]
@@ -1586,6 +1656,215 @@ spec:
     let efs = spec.spec.volumes[0].efs.as_ref().unwrap();
     assert_eq!(efs.file_system_id, "fs-0123456789abcdef0");
     assert_eq!(efs.root_directory.as_deref(), Some("/data"));
+}
+
+#[test]
+fn test_misspelled_read_only_is_rejected_not_silently_ignored() {
+    // The whole point of DetailedMountPoint being a named struct with
+    // deny_unknown_fields: an untagged inline struct variant routes unknown
+    // keys to __ignore, so `readonly` (wrong case) would parse as
+    // read_only: false and register a WRITABLE mount while reporting success.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: typo
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: config
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      mountPoints:
+        /config:
+          sourceVolume: config
+          readonly: true
+"#;
+    assert!(
+        serde_yaml::from_str::<ServiceSpec>(yaml).is_err(),
+        "a misspelled readOnly must not silently produce a writable mount"
+    );
+}
+
+#[test]
+fn test_validate_accepts_real_diamond() {
+    // A genuine diamond: `d` has TWO children. Every prior cycle test had at
+    // most one child per node, so the DFS's (node, child_index) frame plus
+    // manual path Vec -- the part most likely to desynchronise -- had no
+    // coverage at all. This exercises path bookkeeping across the completion
+    // of one child's subtree before the next is entered.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: diamond
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: a
+      image: a:latest
+      essential: false
+    - name: b
+      image: b:latest
+      essential: false
+      dependsOn:
+        - containerName: a
+          condition: SUCCESS
+    - name: c
+      image: c:latest
+      essential: false
+      dependsOn:
+        - containerName: a
+          condition: SUCCESS
+    - name: d
+      image: d:latest
+      essential: true
+      dependsOn:
+        - containerName: b
+          condition: SUCCESS
+        - containerName: c
+          condition: SUCCESS
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(
+        spec.validate().is_ok(),
+        "a diamond is a DAG, not a cycle: {:?}",
+        spec.validate().unwrap_err()
+    );
+}
+
+#[test]
+fn test_cycle_report_excludes_non_cycle_prefix() {
+    // r -> a -> b -> c -> a. The reported cycle must be a -> b -> c -> a,
+    // without the r prefix that merely leads into it.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: tailed-cycle
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: r
+      image: r:latest
+      essential: true
+      dependsOn:
+        - containerName: a
+          condition: START
+    - name: a
+      image: a:latest
+      essential: false
+      dependsOn:
+        - containerName: b
+          condition: START
+    - name: b
+      image: b:latest
+      essential: false
+      dependsOn:
+        - containerName: c
+          condition: START
+    - name: c
+      image: c:latest
+      essential: false
+      dependsOn:
+        - containerName: a
+          condition: START
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("a -> b -> c -> a"),
+        "cycle should be reported exactly, without the r prefix: {err}"
+    );
+}
+
+#[test]
+fn test_validate_rejects_efs_iam_without_transit_encryption() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: efs-iam
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: shared
+      efs:
+        fileSystemId: fs-0123456789abcdef0
+        iam: ENABLED
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      mountPoints:
+        /data: shared
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("transitEncryption"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_access_point_with_root_directory() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: efs-ap
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: shared
+      efs:
+        fileSystemId: fs-0123456789abcdef0
+        accessPointId: fsap-0123456789abcdef0
+        rootDirectory: /data
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      mountPoints:
+        /data: shared
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("accessPointId"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_efs_volume_in_single_container_mode() {
+    // Single-container mode has no mountPoints field, so an EFS volume there
+    // would be attached to the task definition and mounted nowhere.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: efs-flat
+  cluster: test-cluster
+spec:
+  image: app:latest
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: shared
+      efs:
+        fileSystemId: fs-0123456789abcdef0
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("mounted nowhere"), "error was: {err}");
 }
 
 #[cfg(test)]

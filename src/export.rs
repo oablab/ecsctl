@@ -119,7 +119,10 @@ async fn build_spec(
         .volumes()
         .iter()
         .map(|v| {
-            let name = v.name().unwrap_or_default().to_string();
+            let name = v
+                .name()
+                .context("task definition contains a volume with no name")?
+                .to_string();
 
             // Refuse to export what this spec cannot express, rather than
             // emitting a name-only volume that silently becomes empty
@@ -143,27 +146,55 @@ async fn build_spec(
                     );
                 }
             }
+            if v.configured_at_launch() == Some(true) {
+                // Carrying this through would be worse than refusing it:
+                // configuredAtLaunch on the task definition is only half of an
+                // EBS attachment, and this tool does not send the other half
+                // (volumeConfigurations on Create/UpdateService). A reapplied
+                // spec would register successfully and produce tasks with no
+                // volume where the application expects one.
+                anyhow::bail!(
+                    "volume '{name}' is configuredAtLaunch (an EBS volume attached at deployment time), which this spec cannot represent: reapplying it would register the task definition without the volumeConfigurations needed to actually attach the volume. Export refused rather than producing a spec that deploys without the volume"
+                );
+            }
 
-            let efs = v.efs_volume_configuration().map(|e| {
-                let auth = e.authorization_config();
-                crate::apply::EfsVolumeSpec {
-                    file_system_id: e.file_system_id().to_string(),
-                    root_directory: e.root_directory().map(|s| s.to_string()),
-                    transit_encryption: e
-                        .transit_encryption()
-                        .map(|t| t.as_str().to_string()),
-                    access_point_id: auth
-                        .and_then(|a| a.access_point_id())
-                        .map(|s| s.to_string()),
-                    iam: auth.and_then(|a| a.iam()).map(|i| i.as_str().to_string()),
+            let efs = match v.efs_volume_configuration() {
+                None => None,
+                Some(e) => {
+                    if e.transit_encryption_port().is_some() {
+                        anyhow::bail!(
+                            "volume '{name}' sets an EFS transitEncryptionPort, which this spec cannot represent. Export refused rather than silently reverting it to the default port"
+                        );
+                    }
+                    let auth = e.authorization_config();
+                    let toggle = |v: &str| -> Result<crate::apply::EfsToggle> {
+                        match v {
+                            "ENABLED" => Ok(crate::apply::EfsToggle::Enabled),
+                            "DISABLED" => Ok(crate::apply::EfsToggle::Disabled),
+                            other => anyhow::bail!(
+                                "volume '{name}' has an EFS setting this spec does not model: '{other}'"
+                            ),
+                        }
+                    };
+                    Some(crate::apply::EfsVolumeSpec {
+                        file_system_id: e.file_system_id().to_string(),
+                        root_directory: e.root_directory().map(|s| s.to_string()),
+                        transit_encryption: e
+                            .transit_encryption()
+                            .map(|t| toggle(t.as_str()))
+                            .transpose()?,
+                        access_point_id: auth
+                            .and_then(|a| a.access_point_id())
+                            .map(|s| s.to_string()),
+                        iam: auth
+                            .and_then(|a| a.iam())
+                            .map(|i| toggle(i.as_str()))
+                            .transpose()?,
+                    })
                 }
-            });
+            };
 
-            Ok(crate::apply::VolumeSpec {
-                name,
-                efs,
-                configured_at_launch: v.configured_at_launch().unwrap_or(false),
-            })
+            Ok(crate::apply::VolumeSpec { name, efs })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -229,12 +260,13 @@ async fn build_spec(
                     .depends_on()
                     .iter()
                     .filter_map(|d| {
-                        // An externally created task definition can legally
-                        // use HEALTHY, which this spec parses but refuses on
-                        // apply. Carrying it through would produce a spec that
-                        // cannot be reapplied, so it is dropped with the
-                        // ordering it expressed noted as lost rather than
-                        // emitted as something apply will reject.
+                        // An externally created task definition can legally use
+                        // HEALTHY, which this spec parses but refuses on apply.
+                        // Carrying it through would produce a spec that cannot
+                        // be reapplied, so it is dropped -- but loudly: dropping
+                        // a startup-ordering constraint in silence is how an app
+                        // container ends up running before its dependency is
+                        // ready.
                         let condition = match d.condition() {
                             aws_sdk_ecs::types::ContainerCondition::Start => {
                                 crate::apply::DependsOnCondition::Start
@@ -245,7 +277,15 @@ async fn build_spec(
                             aws_sdk_ecs::types::ContainerCondition::Complete => {
                                 crate::apply::DependsOnCondition::Complete
                             }
-                            _ => return None,
+                            other => {
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  dropping dependsOn {} -> {} (condition {}): not representable in this spec, so the exported YAML does not preserve that startup ordering",
+                                    cd.name().unwrap_or("?"),
+                                    d.container_name(),
+                                    other.as_str()
+                                );
+                                return None;
+                            }
                         };
                         Some(crate::apply::DependsOn {
                             container_name: d.container_name().to_string(),
@@ -253,11 +293,35 @@ async fn build_spec(
                         })
                     })
                     .collect();
-                let linux_parameters = cd.linux_parameters().and_then(|lp| {
-                    lp.capabilities().map(|c| crate::apply::LinuxParameters {
-                        capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
-                    })
-                });
+                let linux_parameters = match cd.linux_parameters().and_then(|lp| lp.capabilities())
+                {
+                    None => None,
+                    Some(c) => {
+                        if !c.add().is_empty() {
+                            anyhow::bail!(
+                                "container '{}' adds Linux capabilities ({}), which this spec cannot represent. Export refused rather than silently dropping them",
+                                cd.name().unwrap_or("?"),
+                                c.add().join(", ")
+                            );
+                        }
+                        // apply's validate() hard-rejects anything outside its
+                        // known capability list, so exporting a name it does not
+                        // know would produce a spec that fails on reapply with a
+                        // "typo" error naming a value the user never typed.
+                        for cap in c.drop() {
+                            if !crate::apply::is_known_capability(cap) {
+                                anyhow::bail!(
+                                    "container '{}' drops Linux capability '{}', which this spec's validation does not recognise. Export refused rather than emitting a spec that cannot be reapplied",
+                                    cd.name().unwrap_or("?"),
+                                    cap
+                                );
+                            }
+                        }
+                        Some(crate::apply::LinuxParameters {
+                            capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
+                        })
+                    }
+                };
                 let mut mount_points: std::collections::BTreeMap<
                     String,
                     crate::apply::MountPointSpec,
@@ -267,10 +331,12 @@ async fn build_spec(
                         // Preserve readOnly. Dropping it silently turned a
                         // read-only mount into a writable one on reapply.
                         let spec = if mp.read_only().unwrap_or(false) {
-                            crate::apply::MountPointSpec::Detailed {
-                                source_volume: sv.to_string(),
-                                read_only: true,
-                            }
+                            crate::apply::MountPointSpec::Detailed(
+                                crate::apply::DetailedMountPoint {
+                                    source_volume: sv.to_string(),
+                                    read_only: true,
+                                },
+                            )
                         } else {
                             crate::apply::MountPointSpec::Volume(sv.to_string())
                         };
@@ -363,12 +429,13 @@ async fn build_spec(
                     .depends_on()
                     .iter()
                     .filter_map(|d| {
-                        // An externally created task definition can legally
-                        // use HEALTHY, which this spec parses but refuses on
-                        // apply. Carrying it through would produce a spec that
-                        // cannot be reapplied, so it is dropped with the
-                        // ordering it expressed noted as lost rather than
-                        // emitted as something apply will reject.
+                        // An externally created task definition can legally use
+                        // HEALTHY, which this spec parses but refuses on apply.
+                        // Carrying it through would produce a spec that cannot
+                        // be reapplied, so it is dropped -- but loudly: dropping
+                        // a startup-ordering constraint in silence is how an app
+                        // container ends up running before its dependency is
+                        // ready.
                         let condition = match d.condition() {
                             aws_sdk_ecs::types::ContainerCondition::Start => {
                                 crate::apply::DependsOnCondition::Start
@@ -379,7 +446,15 @@ async fn build_spec(
                             aws_sdk_ecs::types::ContainerCondition::Complete => {
                                 crate::apply::DependsOnCondition::Complete
                             }
-                            _ => return None,
+                            other => {
+                                eprintln!(
+                                    "  \u{26a0}\u{fe0f}  dropping dependsOn {} -> {} (condition {}): not representable in this spec, so the exported YAML does not preserve that startup ordering",
+                                    cd.name().unwrap_or("?"),
+                                    d.container_name(),
+                                    other.as_str()
+                                );
+                                return None;
+                            }
                         };
                         Some(crate::apply::DependsOn {
                             container_name: d.container_name().to_string(),
@@ -387,11 +462,35 @@ async fn build_spec(
                         })
                     })
                     .collect();
-                let linux_parameters = cd.linux_parameters().and_then(|lp| {
-                    lp.capabilities().map(|c| crate::apply::LinuxParameters {
-                        capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
-                    })
-                });
+                let linux_parameters = match cd.linux_parameters().and_then(|lp| lp.capabilities())
+                {
+                    None => None,
+                    Some(c) => {
+                        if !c.add().is_empty() {
+                            anyhow::bail!(
+                                "container '{}' adds Linux capabilities ({}), which this spec cannot represent. Export refused rather than silently dropping them",
+                                cd.name().unwrap_or("?"),
+                                c.add().join(", ")
+                            );
+                        }
+                        // apply's validate() hard-rejects anything outside its
+                        // known capability list, so exporting a name it does not
+                        // know would produce a spec that fails on reapply with a
+                        // "typo" error naming a value the user never typed.
+                        for cap in c.drop() {
+                            if !crate::apply::is_known_capability(cap) {
+                                anyhow::bail!(
+                                    "container '{}' drops Linux capability '{}', which this spec's validation does not recognise. Export refused rather than emitting a spec that cannot be reapplied",
+                                    cd.name().unwrap_or("?"),
+                                    cap
+                                );
+                            }
+                        }
+                        Some(crate::apply::LinuxParameters {
+                            capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
+                        })
+                    }
+                };
                 let mut mount_points: std::collections::BTreeMap<
                     String,
                     crate::apply::MountPointSpec,
@@ -401,10 +500,12 @@ async fn build_spec(
                         // Preserve readOnly. Dropping it silently turned a
                         // read-only mount into a writable one on reapply.
                         let spec = if mp.read_only().unwrap_or(false) {
-                            crate::apply::MountPointSpec::Detailed {
-                                source_volume: sv.to_string(),
-                                read_only: true,
-                            }
+                            crate::apply::MountPointSpec::Detailed(
+                                crate::apply::DetailedMountPoint {
+                                    source_volume: sv.to_string(),
+                                    read_only: true,
+                                },
+                            )
                         } else {
                             crate::apply::MountPointSpec::Volume(sv.to_string())
                         };
