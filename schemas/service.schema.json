@@ -148,7 +148,7 @@
               "readonlyRootFilesystem": { "type": "boolean", "default": false },
               "dependsOn": {
                 "type": "array",
-                "description": "Startup ordering against other containers in this task. HEALTHY is not yet supported (requires healthCheck, which this schema has no way to configure) and is rejected at validation time.",
+                "description": "Startup ordering against other containers in this task. HEALTHY is not yet supported (requires healthCheck, which this schema has no way to configure) and is rejected at validation time. SUCCESS/COMPLETE additionally require the *target* container (named in containerName) to have essential: false -- AWS rejects a SUCCESS/COMPLETE dependency on an essential container.",
                 "items": {
                   "type": "object",
                   "required": ["containerName", "condition"],

@@ -220,15 +220,63 @@ impl ServiceSpec {
         // parsed and validated cleanly, then failed at RegisterTaskDefinition
         // with an AWS-worded error unrelated to the line that caused it.
         if let Some(ref containers) = spec.containers {
+            if containers.is_empty() {
+                anyhow::bail!(
+                    "spec.containers is present but empty: specify at least one container, or omit spec.containers to use single-container mode"
+                );
+            }
+
+            // Two containers sharing a name collide in the registered task
+            // definition. A HashSet silently absorbs the duplicate, so check
+            // by comparing lengths rather than just building one.
+            {
+                let mut seen = std::collections::HashSet::with_capacity(containers.len());
+                for cs in containers {
+                    if !seen.insert(cs.name.as_str()) {
+                        anyhow::bail!(
+                            "container name '{}' is used by more than one entry in spec.containers",
+                            cs.name
+                        );
+                    }
+                }
+            }
+
             let container_names: std::collections::HashSet<&str> =
                 containers.iter().map(|c| c.name.as_str()).collect();
+            let essential_by_name: std::collections::HashMap<&str, bool> = containers
+                .iter()
+                .map(|c| (c.name.as_str(), c.essential))
+                .collect();
             let volume_names: std::collections::HashSet<&str> =
                 spec.volumes.iter().map(|v| v.name.as_str()).collect();
 
             for cs in containers {
                 for dep in &cs.depends_on {
+                    // Verified against AWS's own reported error text (the docs
+                    // page states the restriction but not which side of the
+                    // dependency it binds): "A dependency container with
+                    // SUCCESS or COMPLETE condition cannot be an essential
+                    // container" -- the restriction is on dep.container_name
+                    // (the target being waited on), not on cs (the container
+                    // declaring the dependsOn). An init container with
+                    // essential: false being awaited by an essential app
+                    // container -- this crate's motivating case -- is legal;
+                    // it is the init container itself that must be
+                    // essential: false.
+                    let target_essential = essential_by_name.get(dep.container_name.as_str());
                     match dep.condition.as_str() {
-                        "START" | "SUCCESS" | "COMPLETE" => {}
+                        "START" => {}
+                        "COMPLETE" | "SUCCESS" if target_essential == Some(&true) => {
+                            anyhow::bail!(
+                                "container '{}' dependsOn '{}' with condition {}, but '{}' is essential: true. AWS rejects this combination (\"A dependency container with SUCCESS or COMPLETE condition cannot be an essential container\") -- set essential: false on '{}', or use condition: START",
+                                cs.name,
+                                dep.container_name,
+                                dep.condition,
+                                dep.container_name,
+                                dep.container_name
+                            )
+                        }
+                        "COMPLETE" | "SUCCESS" => {}
                         "HEALTHY" => anyhow::bail!(
                             "container '{}' dependsOn '{}' uses condition HEALTHY, which is not yet supported: it requires a healthCheck on '{}' that this spec has no way to configure, and would fail at RegisterTaskDefinition rather than here. Use START, SUCCESS, or COMPLETE instead",
                             cs.name,
@@ -254,7 +302,14 @@ impl ServiceSpec {
                     }
                 }
 
-                for (container_path, source_volume) in &cs.mount_points {
+                // BTreeMap iteration is deterministic, so this reports the
+                // same offending mount every run for the same spec rather
+                // than depending on HashMap's unspecified iteration order.
+                for (container_path, source_volume) in
+                    cs.mount_points
+                        .iter()
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                {
                     if !volume_names.contains(source_volume.as_str()) {
                         anyhow::bail!(
                             "container '{}' mounts '{}' at '{}', but '{}' is not defined in spec.volumes",
@@ -911,6 +966,107 @@ spec:
     assert!(spec.spec.containers.is_none());
     assert!(spec.spec.volumes.is_empty());
     assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn test_validate_rejects_success_condition_on_essential_target() {
+    // The restriction binds the target of dependsOn (the container being
+    // waited on), not the container declaring dependsOn -- confirmed against
+    // AWS's actual reported error text ("A dependency container with SUCCESS
+    // or COMPLETE condition cannot be an essential container"), not just the
+    // docs page's ambiguous wording.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: sidecar-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      dependsOn:
+        - containerName: envoy
+          condition: SUCCESS
+    - name: envoy
+      image: envoy:latest
+      essential: true
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("envoy"), "error was: {err}");
+    assert!(err.contains("essential"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_accepts_success_condition_on_nonessential_target() {
+    // The motivating shape: an essential app container waits for a
+    // non-essential init container to SUCCEED. This must stay legal --
+    // it's the exact case this PR exists to support.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: sidecar-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      dependsOn:
+        - containerName: init-perms
+          condition: SUCCESS
+    - name: init-perms
+      image: app:latest
+      essential: false
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn test_validate_rejects_duplicate_container_names() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: dup-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: app
+      image: one:latest
+    - name: app
+      image: two:latest
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("app"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_empty_containers_list() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: empty-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers: []
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_err());
 }
 
 #[cfg(test)]
