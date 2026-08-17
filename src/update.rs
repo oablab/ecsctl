@@ -81,9 +81,13 @@ async fn check_no_sidecars(config: &aws_config::SdkConfig, cfg: &Config, name: &
     if non_system.len() > 1 {
         let names: Vec<_> = non_system.iter().map(|c| c.name().unwrap_or("?")).collect();
         anyhow::bail!(
-            "service has {} containers ({}); update only supports single-container services to avoid silently dropping sidecars",
+            "service has {} containers ({}); update only supports single-container services, because it rebuilds the task definition from the flat single-container fields and would drop the others.\n\nFor a multi-container service, edit it as a spec instead:\n  ecsctl export {} -o {}.yaml   # emits spec.containers[] with every container\n  # edit {}.yaml\n  ecsctl apply -f {}.yaml",
             non_system.len(),
-            names.join(", ")
+            names.join(", "),
+            name,
+            name,
+            name,
+            name
         );
     }
 
@@ -169,7 +173,7 @@ mod tests {
     #[tokio::test]
     async fn test_sidecar_guard_single_container_passes() {
         let containers = vec![ContainerDefinition::builder().name("app").build()];
-        let ecs = mock_ecs_with_containers(containers);
+        let _ecs = mock_ecs_with_containers(containers);
 
         // check_no_sidecars needs Config with alias — we test the logic via the ECS client directly
         // Here we verify the container counting logic
