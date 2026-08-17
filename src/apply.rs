@@ -21,6 +21,20 @@ pub struct Metadata {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DependsOn {
+    pub container_name: String,
+    pub condition: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LinuxParameters {
+    #[serde(default)]
+    pub capabilities_drop: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerSpec {
     pub name: String,
     pub image: String,
@@ -31,15 +45,45 @@ pub struct ContainerSpec {
     #[serde(default)]
     pub command: Option<Vec<String>>,
     #[serde(default)]
+    pub entry_point: Option<Vec<String>>,
+    #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub secrets: HashMap<String, String>,
     #[serde(default)]
     pub log_group: Option<String>,
+    /// Container-level user override (e.g. "0" for root, "1000" for a fixed uid).
+    /// Sidecars that need root for one-shot setup (chown, tailscaled) while the
+    /// app container stays non-root need this per-container, not just at the task
+    /// level, which ECS does not support anyway (there is no task-level "user").
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub readonly_root_filesystem: bool,
+    /// Startup ordering: this container waits for the named one to reach
+    /// `condition` (START, SUCCESS, COMPLETE, or HEALTHY) before starting.
+    /// Without this, an init container that must run and exit before the app
+    /// container starts (e.g. chowning a shared volume so a non-root container
+    /// can write to it) has no way to express that ordering — ECS starts every
+    /// container in a task concurrently by default.
+    #[serde(default)]
+    pub depends_on: Vec<DependsOn>,
+    #[serde(default)]
+    pub linux_parameters: Option<LinuxParameters>,
+    /// Shared-volume mount points: containerPath -> sourceVolume (matching the
+    /// `name` of an entry in `spec.volumes`).
+    #[serde(default)]
+    pub mount_points: HashMap<String, String>,
 }
 
 fn default_essential() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeSpec {
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -76,6 +120,10 @@ pub struct Spec {
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub containers: Option<Vec<ContainerSpec>>,
+    /// Task-level shared volumes (ephemeral, ECS-managed — not EFS or host path).
+    /// Referenced by name from each container's `mountPoints`.
+    #[serde(default)]
+    pub volumes: Vec<VolumeSpec>,
 }
 
 const VALID_FARGATE_SIZING: &[(u32, &[u32])] = &[
@@ -225,6 +273,59 @@ fn build_container_def(
         builder = builder.set_command(Some(cmd.clone()));
     }
 
+    if let Some(ref ep) = cs.entry_point {
+        builder = builder.set_entry_point(Some(ep.clone()));
+    }
+
+    if let Some(ref user) = cs.user {
+        builder = builder.user(user);
+    }
+
+    if cs.readonly_root_filesystem {
+        builder = builder.readonly_root_filesystem(true);
+    }
+
+    for dep in &cs.depends_on {
+        let condition = match dep.condition.as_str() {
+            "START" => aws_sdk_ecs::types::ContainerCondition::Start,
+            "SUCCESS" => aws_sdk_ecs::types::ContainerCondition::Success,
+            "COMPLETE" => aws_sdk_ecs::types::ContainerCondition::Complete,
+            "HEALTHY" => aws_sdk_ecs::types::ContainerCondition::Healthy,
+            other => anyhow::bail!(
+                "invalid dependsOn condition '{}' for container '{}': expected START, SUCCESS, COMPLETE, or HEALTHY",
+                other,
+                cs.name
+            ),
+        };
+        builder = builder.depends_on(
+            aws_sdk_ecs::types::ContainerDependency::builder()
+                .container_name(&dep.container_name)
+                .condition(condition)
+                .build()?,
+        );
+    }
+
+    if let Some(ref lp) = cs.linux_parameters {
+        builder = builder.linux_parameters(
+            aws_sdk_ecs::types::LinuxParameters::builder()
+                .capabilities(
+                    aws_sdk_ecs::types::KernelCapabilities::builder()
+                        .set_drop(Some(lp.capabilities_drop.clone()))
+                        .build(),
+                )
+                .build(),
+        );
+    }
+
+    for (container_path, source_volume) in &cs.mount_points {
+        builder = builder.mount_points(
+            aws_sdk_ecs::types::MountPoint::builder()
+                .source_volume(source_volume)
+                .container_path(container_path)
+                .build(),
+        );
+    }
+
     if cs.port > 0 {
         builder = builder.port_mappings(
             aws_sdk_ecs::types::PortMapping::builder()
@@ -338,12 +439,28 @@ pub async fn run_from_string(
             essential: true,
             port: spec.spec.port,
             command: spec.spec.command.clone(),
+            entry_point: None,
             env: spec.spec.env.clone(),
             secrets: spec.spec.secrets.clone(),
             log_group: spec.spec.log_group.clone(),
+            user: None,
+            readonly_root_filesystem: false,
+            depends_on: Vec::new(),
+            linux_parameters: None,
+            mount_points: HashMap::new(),
         };
         let cd = build_container_def(&cs, service_name, region)?;
         task_def_req = task_def_req.container_definitions(cd);
+    }
+
+    if !spec.spec.volumes.is_empty() {
+        for vol in &spec.spec.volumes {
+            task_def_req = task_def_req.volumes(
+                aws_sdk_ecs::types::Volume::builder()
+                    .name(&vol.name)
+                    .build(),
+            );
+        }
     }
 
     if let Some(ref role) = spec.spec.execution_role_arn {
@@ -640,5 +757,95 @@ spec:
     assert_eq!(spec.spec.containers.as_ref().unwrap()[0].name, "app");
     assert!(spec.spec.containers.as_ref().unwrap()[0].essential);
     assert!(!spec.spec.containers.as_ref().unwrap()[1].essential);
+    assert!(spec.validate().is_ok());
+}
+
+/// Mirrors the shape a tailscale-sidecar-fronted service actually needs: an
+/// init container that chowns a shared volume and must finish (SUCCESS) before
+/// the non-root app container starts, plus root-vs-non-root user overrides,
+/// readonly rootfs, and dropped capabilities on the app container.
+#[test]
+fn test_parse_sidecar_spec_with_depends_on_and_volumes() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: sidecar-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: workspace
+  containers:
+    - name: init-perms
+      image: app:latest
+      essential: false
+      user: "0"
+      entryPoint: ["/bin/sh", "-c"]
+      command: ["chown 1000:1000 /workspace"]
+      mountPoints:
+        /workspace: workspace
+    - name: app
+      image: app:latest
+      essential: true
+      user: "1000"
+      readonlyRootFilesystem: true
+      dependsOn:
+        - containerName: init-perms
+          condition: SUCCESS
+      linuxParameters:
+        capabilitiesDrop: ["ALL"]
+      mountPoints:
+        /workspace: workspace
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_ok());
+
+    let containers = spec.spec.containers.as_ref().unwrap();
+    assert_eq!(spec.spec.volumes.len(), 1);
+    assert_eq!(spec.spec.volumes[0].name, "workspace");
+
+    let init = &containers[0];
+    assert_eq!(init.user.as_deref(), Some("0"));
+    assert_eq!(
+        init.entry_point.as_ref().unwrap(),
+        &vec!["/bin/sh".to_string(), "-c".to_string()]
+    );
+    assert_eq!(init.mount_points.get("/workspace").unwrap(), "workspace");
+
+    let app = &containers[1];
+    assert_eq!(app.user.as_deref(), Some("1000"));
+    assert!(app.readonly_root_filesystem);
+    assert_eq!(app.depends_on.len(), 1);
+    assert_eq!(app.depends_on[0].container_name, "init-perms");
+    assert_eq!(app.depends_on[0].condition, "SUCCESS");
+    assert_eq!(
+        app.linux_parameters.as_ref().unwrap().capabilities_drop,
+        vec!["ALL".to_string()]
+    );
+}
+
+#[test]
+fn test_backward_compatible_single_container_still_parses() {
+    // The single-container path must keep working unchanged: none of the new
+    // fields are required, and an old spec with none of them present must still
+    // parse and validate exactly as before.
+    let spec: ServiceSpec = serde_yaml::from_str(
+        r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: test-app
+  cluster: test-cluster
+spec:
+  image: nginx:latest
+  cpu: "256"
+  memory: "512"
+"#,
+    )
+    .unwrap();
+    assert!(spec.spec.containers.is_none());
+    assert!(spec.spec.volumes.is_empty());
     assert!(spec.validate().is_ok());
 }

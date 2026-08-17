@@ -169,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn test_sidecar_guard_single_container_passes() {
         let containers = vec![ContainerDefinition::builder().name("app").build()];
-        let ecs = mock_ecs_with_containers(containers);
+        let _ecs = mock_ecs_with_containers(containers);
 
         // check_no_sidecars needs Config with alias — we test the logic via the ECS client directly
         // Here we verify the container counting logic

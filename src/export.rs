@@ -101,6 +101,16 @@ async fn build_spec(
     let execution_role = td.execution_role_arn().map(|s| s.to_string());
     let task_role = td.task_role_arn().map(|s| s.to_string());
 
+    let volumes: Vec<crate::apply::VolumeSpec> = td
+        .volumes()
+        .iter()
+        .filter_map(|v| {
+            v.name().map(|n| crate::apply::VolumeSpec {
+                name: n.to_string(),
+            })
+        })
+        .collect();
+
     let arch = td
         .runtime_platform()
         .and_then(|rp| rp.cpu_architecture())
@@ -151,15 +161,48 @@ async fn build_spec(
                         Some(cmds.iter().map(|s| s.to_string()).collect())
                     }
                 };
+                let entry_point: Option<Vec<String>> = {
+                    let eps = cd.entry_point();
+                    if eps.is_empty() {
+                        None
+                    } else {
+                        Some(eps.iter().map(|s| s.to_string()).collect())
+                    }
+                };
+                let depends_on: Vec<crate::apply::DependsOn> = cd
+                    .depends_on()
+                    .iter()
+                    .map(|d| crate::apply::DependsOn {
+                        container_name: d.container_name().to_string(),
+                        condition: d.condition().as_str().to_string(),
+                    })
+                    .collect();
+                let linux_parameters = cd.linux_parameters().and_then(|lp| {
+                    lp.capabilities().map(|c| crate::apply::LinuxParameters {
+                        capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
+                    })
+                });
+                let mut mount_points: HashMap<String, String> = HashMap::new();
+                for mp in cd.mount_points() {
+                    if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
+                        mount_points.insert(cp.to_string(), sv.to_string());
+                    }
+                }
                 cs_vec.push(crate::apply::ContainerSpec {
                     name: cd.name().unwrap_or("app").to_string(),
                     image: cd.image().unwrap_or("?").to_string(),
                     essential: cd.essential().unwrap_or(true),
                     port: p,
                     command: cmd,
+                    entry_point,
                     env: env_map,
                     secrets: sec_map,
                     log_group: lg,
+                    user: cd.user().map(|s| s.to_string()),
+                    readonly_root_filesystem: cd.readonly_root_filesystem().unwrap_or(false),
+                    depends_on,
+                    linux_parameters,
+                    mount_points,
                 });
             }
             (
@@ -236,6 +279,7 @@ async fn build_spec(
             port,
             command,
             containers,
+            volumes,
         },
     };
 

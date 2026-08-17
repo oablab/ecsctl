@@ -126,6 +126,69 @@
           "type": "object",
           "additionalProperties": { "type": "string" },
           "description": "Secrets from SSM/SecretsManager (key: ARN)"
+        },
+        "containers": {
+          "type": "array",
+          "description": "Multi-container task definition (sidecars). When present, image/port/command/entryPoint/env/secrets/logGroup/containerName at the spec level are ignored in favor of this list.",
+          "items": {
+            "type": "object",
+            "required": ["name", "image"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "description": "Container name (used by dependsOn and mountPoints)" },
+              "image": { "type": "string" },
+              "essential": { "type": "boolean", "default": true },
+              "port": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0 },
+              "command": { "type": "array", "items": { "type": "string" } },
+              "entryPoint": { "type": "array", "items": { "type": "string" }, "description": "Override the image's ENTRYPOINT" },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "secrets": { "type": "object", "additionalProperties": { "type": "string" } },
+              "logGroup": { "type": "string" },
+              "user": { "type": "string", "description": "Container user override, e.g. \"0\" for root or \"1000\" for a fixed uid" },
+              "readonlyRootFilesystem": { "type": "boolean", "default": false },
+              "dependsOn": {
+                "type": "array",
+                "description": "Startup ordering against other containers in this task",
+                "items": {
+                  "type": "object",
+                  "required": ["containerName", "condition"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "containerName": { "type": "string" },
+                    "condition": { "type": "string", "enum": ["START", "SUCCESS", "COMPLETE", "HEALTHY"] }
+                  }
+                }
+              },
+              "linuxParameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "capabilitiesDrop": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Linux capabilities to drop, e.g. [\"ALL\"]"
+                  }
+                }
+              },
+              "mountPoints": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "containerPath -> sourceVolume (sourceVolume must match a name in spec.volumes)"
+              }
+            }
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "description": "Task-level shared volumes (ephemeral, ECS-managed). Referenced by name from each container's mountPoints.",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" }
+            }
+          }
         }
       }
     }
