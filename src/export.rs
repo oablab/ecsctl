@@ -118,12 +118,54 @@ async fn build_spec(
     let volumes: Vec<crate::apply::VolumeSpec> = td
         .volumes()
         .iter()
-        .filter_map(|v| {
-            v.name().map(|n| crate::apply::VolumeSpec {
-                name: n.to_string(),
+        .map(|v| {
+            let name = v.name().unwrap_or_default().to_string();
+
+            // Refuse to export what this spec cannot express, rather than
+            // emitting a name-only volume that silently becomes empty
+            // task-local scratch on reapply. Before this check, exporting an
+            // EFS-backed service produced a spec that deployed with no EFS
+            // mount at all and no indication anything was lost.
+            if v.docker_volume_configuration().is_some() {
+                anyhow::bail!(
+                    "volume '{name}' uses dockerVolumeConfiguration, which this spec cannot represent (and which is EC2-only, not Fargate). Export refused rather than silently converting it to empty scratch storage"
+                );
+            }
+            if v.fsx_windows_file_server_volume_configuration().is_some() {
+                anyhow::bail!(
+                    "volume '{name}' uses an FSx for Windows File Server configuration, which this spec cannot represent. Export refused rather than silently converting it to empty scratch storage"
+                );
+            }
+            if let Some(host) = v.host() {
+                if host.source_path().is_some() {
+                    anyhow::bail!(
+                        "volume '{name}' is a bind mount with a host sourcePath, which this spec cannot represent (and which is EC2-only, not Fargate). Export refused rather than silently converting it to empty scratch storage"
+                    );
+                }
+            }
+
+            let efs = v.efs_volume_configuration().map(|e| {
+                let auth = e.authorization_config();
+                crate::apply::EfsVolumeSpec {
+                    file_system_id: e.file_system_id().to_string(),
+                    root_directory: e.root_directory().map(|s| s.to_string()),
+                    transit_encryption: e
+                        .transit_encryption()
+                        .map(|t| t.as_str().to_string()),
+                    access_point_id: auth
+                        .and_then(|a| a.access_point_id())
+                        .map(|s| s.to_string()),
+                    iam: auth.and_then(|a| a.iam()).map(|i| i.as_str().to_string()),
+                }
+            });
+
+            Ok(crate::apply::VolumeSpec {
+                name,
+                efs,
+                configured_at_launch: v.configured_at_launch().unwrap_or(false),
             })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let arch = td
         .runtime_platform()
@@ -186,9 +228,29 @@ async fn build_spec(
                 let depends_on: Vec<crate::apply::DependsOn> = cd
                     .depends_on()
                     .iter()
-                    .map(|d| crate::apply::DependsOn {
-                        container_name: d.container_name().to_string(),
-                        condition: d.condition().as_str().to_string(),
+                    .filter_map(|d| {
+                        // An externally created task definition can legally
+                        // use HEALTHY, which this spec parses but refuses on
+                        // apply. Carrying it through would produce a spec that
+                        // cannot be reapplied, so it is dropped with the
+                        // ordering it expressed noted as lost rather than
+                        // emitted as something apply will reject.
+                        let condition = match d.condition() {
+                            aws_sdk_ecs::types::ContainerCondition::Start => {
+                                crate::apply::DependsOnCondition::Start
+                            }
+                            aws_sdk_ecs::types::ContainerCondition::Success => {
+                                crate::apply::DependsOnCondition::Success
+                            }
+                            aws_sdk_ecs::types::ContainerCondition::Complete => {
+                                crate::apply::DependsOnCondition::Complete
+                            }
+                            _ => return None,
+                        };
+                        Some(crate::apply::DependsOn {
+                            container_name: d.container_name().to_string(),
+                            condition,
+                        })
                     })
                     .collect();
                 let linux_parameters = cd.linux_parameters().and_then(|lp| {
@@ -196,10 +258,23 @@ async fn build_spec(
                         capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
                     })
                 });
-                let mut mount_points: HashMap<String, String> = HashMap::new();
+                let mut mount_points: std::collections::BTreeMap<
+                    String,
+                    crate::apply::MountPointSpec,
+                > = std::collections::BTreeMap::new();
                 for mp in cd.mount_points() {
                     if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
-                        mount_points.insert(cp.to_string(), sv.to_string());
+                        // Preserve readOnly. Dropping it silently turned a
+                        // read-only mount into a writable one on reapply.
+                        let spec = if mp.read_only().unwrap_or(false) {
+                            crate::apply::MountPointSpec::Detailed {
+                                source_volume: sv.to_string(),
+                                read_only: true,
+                            }
+                        } else {
+                            crate::apply::MountPointSpec::Volume(sv.to_string())
+                        };
+                        mount_points.insert(cp.to_string(), spec);
                     }
                 }
                 cs_vec.push(crate::apply::ContainerSpec {
@@ -287,9 +362,29 @@ async fn build_spec(
                 let depends_on: Vec<crate::apply::DependsOn> = cd
                     .depends_on()
                     .iter()
-                    .map(|d| crate::apply::DependsOn {
-                        container_name: d.container_name().to_string(),
-                        condition: d.condition().as_str().to_string(),
+                    .filter_map(|d| {
+                        // An externally created task definition can legally
+                        // use HEALTHY, which this spec parses but refuses on
+                        // apply. Carrying it through would produce a spec that
+                        // cannot be reapplied, so it is dropped with the
+                        // ordering it expressed noted as lost rather than
+                        // emitted as something apply will reject.
+                        let condition = match d.condition() {
+                            aws_sdk_ecs::types::ContainerCondition::Start => {
+                                crate::apply::DependsOnCondition::Start
+                            }
+                            aws_sdk_ecs::types::ContainerCondition::Success => {
+                                crate::apply::DependsOnCondition::Success
+                            }
+                            aws_sdk_ecs::types::ContainerCondition::Complete => {
+                                crate::apply::DependsOnCondition::Complete
+                            }
+                            _ => return None,
+                        };
+                        Some(crate::apply::DependsOn {
+                            container_name: d.container_name().to_string(),
+                            condition,
+                        })
                     })
                     .collect();
                 let linux_parameters = cd.linux_parameters().and_then(|lp| {
@@ -297,10 +392,23 @@ async fn build_spec(
                         capabilities_drop: c.drop().iter().map(|s| s.to_string()).collect(),
                     })
                 });
-                let mut mount_points: HashMap<String, String> = HashMap::new();
+                let mut mount_points: std::collections::BTreeMap<
+                    String,
+                    crate::apply::MountPointSpec,
+                > = std::collections::BTreeMap::new();
                 for mp in cd.mount_points() {
                     if let (Some(cp), Some(sv)) = (mp.container_path(), mp.source_volume()) {
-                        mount_points.insert(cp.to_string(), sv.to_string());
+                        // Preserve readOnly. Dropping it silently turned a
+                        // read-only mount into a writable one on reapply.
+                        let spec = if mp.read_only().unwrap_or(false) {
+                            crate::apply::MountPointSpec::Detailed {
+                                source_volume: sv.to_string(),
+                                read_only: true,
+                            }
+                        } else {
+                            crate::apply::MountPointSpec::Volume(sv.to_string())
+                        };
+                        mount_points.insert(cp.to_string(), spec);
                     }
                 }
                 let cs = crate::apply::ContainerSpec {

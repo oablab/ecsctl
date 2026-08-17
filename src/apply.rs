@@ -23,14 +23,134 @@ pub struct Metadata {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DependsOn {
     pub container_name: String,
-    pub condition: String,
+    pub condition: DependsOnCondition,
 }
+
+/// The four ECS container dependency conditions.
+///
+/// `Healthy` is present in the enum deliberately even though
+/// `ServiceSpec::validate()` rejects it. Omitting the variant would make
+/// `condition: HEALTHY` fail at serde-parse time with a generic "unknown
+/// variant" message, losing the explanation of *why* it is refused (it needs a
+/// `healthCheck` this spec cannot configure). Parsing it and rejecting it in
+/// validation keeps that explanation while still giving every match on this
+/// type exhaustiveness.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DependsOnCondition {
+    Start,
+    Complete,
+    Success,
+    Healthy,
+}
+
+impl DependsOnCondition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "START",
+            Self::Complete => "COMPLETE",
+            Self::Success => "SUCCESS",
+            Self::Healthy => "HEALTHY",
+        }
+    }
+}
+
+impl std::fmt::Display for DependsOnCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Every Linux capability ECS accepts in `linuxParameters.capabilities.drop`,
+/// per the ECS task definition parameters reference. Validated locally because
+/// a typo (`SYS_ADM` for `SYS_ADMIN`) otherwise reaches AWS and comes back as
+/// a client exception naming the whole request rather than the bad value.
+const VALID_CAPABILITIES: &[&str] = &[
+    "ALL",
+    "AUDIT_CONTROL",
+    "AUDIT_WRITE",
+    "BLOCK_SUSPEND",
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "DAC_READ_SEARCH",
+    "FOWNER",
+    "FSETID",
+    "IPC_LOCK",
+    "IPC_OWNER",
+    "KILL",
+    "LEASE",
+    "LINUX_IMMUTABLE",
+    "MAC_ADMIN",
+    "MAC_OVERRIDE",
+    "MKNOD",
+    "NET_ADMIN",
+    "NET_BIND_SERVICE",
+    "NET_BROADCAST",
+    "NET_RAW",
+    "SETFCAP",
+    "SETGID",
+    "SETPCAP",
+    "SETUID",
+    "SYS_ADMIN",
+    "SYS_BOOT",
+    "SYS_CHROOT",
+    "SYS_MODULE",
+    "SYS_NICE",
+    "SYS_PACCT",
+    "SYS_PTRACE",
+    "SYS_RAWIO",
+    "SYS_RESOURCE",
+    "SYS_TIME",
+    "SYS_TTY_CONFIG",
+    "SYSLOG",
+    "WAKE_ALARM",
+];
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LinuxParameters {
     #[serde(default)]
     pub capabilities_drop: Vec<String>,
+}
+
+/// A container's mount of a task-level volume.
+///
+/// Two accepted forms, because the common case deserves the short one and
+/// `readOnly` needs the long one:
+///
+/// ```yaml
+/// mountPoints:
+///   /workspace: workspace            # read-write, shorthand
+///   /config:
+///     sourceVolume: config
+///     readOnly: true
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum MountPointSpec {
+    Volume(String),
+    Detailed {
+        #[serde(rename = "sourceVolume")]
+        source_volume: String,
+        #[serde(default, rename = "readOnly")]
+        read_only: bool,
+    },
+}
+
+impl MountPointSpec {
+    pub fn source_volume(&self) -> &str {
+        match self {
+            Self::Volume(v) => v,
+            Self::Detailed { source_volume, .. } => source_volume,
+        }
+    }
+
+    pub fn read_only(&self) -> bool {
+        match self {
+            Self::Volume(_) => false,
+            Self::Detailed { read_only, .. } => *read_only,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -61,13 +181,8 @@ pub struct ContainerSpec {
     #[serde(default)]
     pub readonly_root_filesystem: bool,
     /// Startup ordering: this container waits for the named one to reach
-    /// `condition` (START, SUCCESS, or COMPLETE) before starting. `HEALTHY` is
-    /// intentionally not accepted yet: it is a legal ECS value but requires a
-    /// `healthCheck` on the target container, which this spec cannot configure
-    /// — accepting it would parse and validate cleanly, then fail at
-    /// RegisterTaskDefinition with an AWS-worded error days after the YAML was
-    /// written. Rejecting it locally, with a clear reason, until healthCheck
-    /// support lands is better than shipping a value that cannot yet succeed.
+    /// `condition` (START, SUCCESS, or COMPLETE) before starting. `HEALTHY`
+    /// parses but is refused by validation — see `DependsOnCondition`.
     ///
     /// Without this field at all, an init container that must run and exit
     /// before the app container starts (e.g. chowning a shared volume so a
@@ -77,20 +192,47 @@ pub struct ContainerSpec {
     pub depends_on: Vec<DependsOn>,
     #[serde(default)]
     pub linux_parameters: Option<LinuxParameters>,
-    /// Shared-volume mount points: containerPath -> sourceVolume (matching the
-    /// `name` of an entry in `spec.volumes`).
+    /// Shared-volume mount points, keyed by container path. Keying by path
+    /// rather than using a list makes a duplicate mount path unrepresentable,
+    /// and BTreeMap keeps the registered task definition's mount order stable
+    /// across runs for the same spec.
     #[serde(default)]
-    pub mount_points: HashMap<String, String>,
+    pub mount_points: std::collections::BTreeMap<String, MountPointSpec>,
 }
 
 fn default_essential() -> bool {
     true
 }
 
+/// EFS configuration for a task-level volume. EFS is the only non-ephemeral
+/// volume type usable on Fargate (`host` and `dockerVolumeConfiguration` are
+/// EC2-only, and this tool registers Fargate task definitions), so it is the
+/// only one modelled here. Anything else found while exporting is refused
+/// loudly rather than silently flattened to an empty scratch volume.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EfsVolumeSpec {
+    pub file_system_id: String,
+    #[serde(default)]
+    pub root_directory: Option<String>,
+    #[serde(default)]
+    pub transit_encryption: Option<String>,
+    #[serde(default)]
+    pub access_point_id: Option<String>,
+    #[serde(default)]
+    pub iam: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VolumeSpec {
     pub name: String,
+    /// Omitted for an ephemeral, ECS-managed scratch volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efs: Option<EfsVolumeSpec>,
+    /// Deferred configuration at launch, required for attaching an EBS volume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configured_at_launch: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -275,6 +417,18 @@ impl ServiceSpec {
                 spec.volumes.iter().map(|v| v.name.as_str()).collect();
 
             for cs in containers {
+                if let Some(ref lp) = cs.linux_parameters {
+                    for cap in &lp.capabilities_drop {
+                        if !VALID_CAPABILITIES.contains(&cap.as_str()) {
+                            anyhow::bail!(
+                                "container '{}' drops unknown Linux capability '{}': ECS accepts only the capability names in its task definition reference (ALL, SYS_ADMIN, NET_RAW, ...), and a typo here is rejected by AWS with an error that does not name the bad value",
+                                cs.name,
+                                cap
+                            );
+                        }
+                    }
+                }
+
                 for dep in &cs.depends_on {
                     // Existence and self-reference first: these are true
                     // regardless of condition, and checking them after the
@@ -307,9 +461,11 @@ impl ServiceSpec {
                     // it is the init container itself that must be
                     // essential: false.
                     let target_essential = essential_by_name.get(dep.container_name.as_str());
-                    match dep.condition.as_str() {
-                        "START" => {}
-                        "COMPLETE" | "SUCCESS" if target_essential == Some(&true) => {
+                    match dep.condition {
+                        DependsOnCondition::Start => {}
+                        DependsOnCondition::Complete | DependsOnCondition::Success
+                            if target_essential == Some(&true) =>
+                        {
                             anyhow::bail!(
                                 "container '{}' dependsOn '{}' with condition {}, but '{}' is essential: true. AWS rejects this combination (\"A dependency container with SUCCESS or COMPLETE condition cannot be an essential container\") -- set essential: false on '{}', or use condition: START",
                                 cs.name,
@@ -319,38 +475,99 @@ impl ServiceSpec {
                                 dep.container_name
                             )
                         }
-                        "COMPLETE" | "SUCCESS" => {}
-                        "HEALTHY" => anyhow::bail!(
+                        DependsOnCondition::Complete | DependsOnCondition::Success => {}
+                        DependsOnCondition::Healthy => anyhow::bail!(
                             "container '{}' dependsOn '{}' uses condition HEALTHY, which is not yet supported: it requires a healthCheck on '{}' that this spec has no way to configure, and would fail at RegisterTaskDefinition rather than here. Use START, SUCCESS, or COMPLETE instead",
                             cs.name,
                             dep.container_name,
                             dep.container_name
                         ),
-                        other => anyhow::bail!(
-                            "container '{}' dependsOn '{}' has invalid condition '{}': expected START, SUCCESS, or COMPLETE",
-                            cs.name,
-                            dep.container_name,
-                            other
-                        ),
                     }
                 }
 
-                // BTreeMap iteration is deterministic, so this reports the
-                // same offending mount every run for the same spec rather
-                // than depending on HashMap's unspecified iteration order.
-                for (container_path, source_volume) in
-                    cs.mount_points
-                        .iter()
-                        .collect::<std::collections::BTreeMap<_, _>>()
-                {
-                    if !volume_names.contains(source_volume.as_str()) {
+                // mount_points is a BTreeMap, so iteration order — and hence
+                // which offending mount is reported first — is stable for a
+                // given spec.
+                for (container_path, mp) in &cs.mount_points {
+                    if !volume_names.contains(mp.source_volume()) {
                         anyhow::bail!(
                             "container '{}' mounts '{}' at '{}', but '{}' is not defined in spec.volumes",
                             cs.name,
-                            source_volume,
+                            mp.source_volume(),
                             container_path,
-                            source_volume
+                            mp.source_volume()
                         );
+                    }
+                }
+            }
+
+            // Cycle detection. Self-reference is caught above; this catches
+            // the longer loops (A waits on B, B waits on A), which ECS also
+            // rejects but only at RegisterTaskDefinition, and which are much
+            // harder to spot by eye than a self-reference once there are more
+            // than three containers.
+            {
+                let edges: std::collections::BTreeMap<&str, Vec<&str>> = containers
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.name.as_str(),
+                            c.depends_on
+                                .iter()
+                                .map(|d| d.container_name.as_str())
+                                .collect(),
+                        )
+                    })
+                    .collect();
+
+                #[derive(Clone, Copy, PartialEq)]
+                enum Mark {
+                    Open,
+                    Done,
+                }
+
+                // Iterative DFS with an explicit path, so the error can name
+                // the actual cycle rather than just asserting one exists.
+                let mut marks: std::collections::BTreeMap<&str, Mark> =
+                    std::collections::BTreeMap::new();
+                for root in edges.keys() {
+                    if marks.get(root) == Some(&Mark::Done) {
+                        continue;
+                    }
+                    let mut path: Vec<&str> = Vec::new();
+                    // (node, next-child-index)
+                    let mut stack: Vec<(&str, usize)> = vec![(root, 0)];
+                    marks.insert(root, Mark::Open);
+                    path.push(root);
+
+                    while let Some((node, child_idx)) = stack.pop() {
+                        let children = edges.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+                        if child_idx < children.len() {
+                            stack.push((node, child_idx + 1));
+                            let child = children[child_idx];
+                            match marks.get(child) {
+                                Some(Mark::Open) => {
+                                    // Found a back edge: the cycle is the tail
+                                    // of the current path starting at `child`.
+                                    let start = path.iter().position(|n| *n == child).unwrap_or(0);
+                                    let mut cycle: Vec<&str> = path[start..].to_vec();
+                                    cycle.push(child);
+                                    anyhow::bail!(
+                                        "dependsOn cycle in spec.containers: {}. ECS cannot start any container in a cycle, and rejects this at RegisterTaskDefinition",
+                                        cycle.join(" -> ")
+                                    );
+                                }
+                                Some(Mark::Done) => {}
+                                None => {
+                                    marks.insert(child, Mark::Open);
+                                    path.push(child);
+                                    stack.push((child, 0));
+                                }
+                            }
+                        } else {
+                            marks.insert(node, Mark::Done);
+                            path.pop();
+                        }
                     }
                 }
             }
@@ -434,18 +651,17 @@ fn build_container_def(
     }
 
     for dep in &cs.depends_on {
-        let condition = match dep.condition.as_str() {
-            "START" => aws_sdk_ecs::types::ContainerCondition::Start,
-            "SUCCESS" => aws_sdk_ecs::types::ContainerCondition::Success,
-            "COMPLETE" => aws_sdk_ecs::types::ContainerCondition::Complete,
-            // HEALTHY and anything else is rejected in ServiceSpec::validate()
-            // before this function runs on the apply path; this remains a
-            // defensive fallback for direct callers (tests) that bypass
-            // validate().
-            other => anyhow::bail!(
-                "invalid dependsOn condition '{}' for container '{}': expected START, SUCCESS, or COMPLETE (HEALTHY is not yet supported)",
-                other,
-                cs.name
+        let condition = match dep.condition {
+            DependsOnCondition::Start => aws_sdk_ecs::types::ContainerCondition::Start,
+            DependsOnCondition::Success => aws_sdk_ecs::types::ContainerCondition::Success,
+            DependsOnCondition::Complete => aws_sdk_ecs::types::ContainerCondition::Complete,
+            // Rejected in ServiceSpec::validate() before this runs on the
+            // apply path; this arm keeps the match exhaustive and is a
+            // defensive stop for direct callers that bypass validate().
+            DependsOnCondition::Healthy => anyhow::bail!(
+                "container '{}' dependsOn '{}' uses condition HEALTHY, which is not yet supported (no way to configure the required healthCheck)",
+                cs.name,
+                dep.container_name
             ),
         };
         builder = builder.depends_on(
@@ -468,11 +684,12 @@ fn build_container_def(
         );
     }
 
-    for (container_path, source_volume) in &cs.mount_points {
+    for (container_path, mp) in &cs.mount_points {
         builder = builder.mount_points(
             aws_sdk_ecs::types::MountPoint::builder()
-                .source_volume(source_volume)
+                .source_volume(mp.source_volume())
                 .container_path(container_path)
+                .read_only(mp.read_only())
                 .build(),
         );
     }
@@ -598,7 +815,7 @@ pub async fn run_from_string(
             readonly_root_filesystem: false,
             depends_on: Vec::new(),
             linux_parameters: None,
-            mount_points: HashMap::new(),
+            mount_points: std::collections::BTreeMap::new(),
         };
         let cd = build_container_def(&cs, service_name, region)?;
         task_def_req = task_def_req.container_definitions(cd);
@@ -606,11 +823,32 @@ pub async fn run_from_string(
 
     if !spec.spec.volumes.is_empty() {
         for vol in &spec.spec.volumes {
-            task_def_req = task_def_req.volumes(
-                aws_sdk_ecs::types::Volume::builder()
-                    .name(&vol.name)
-                    .build(),
-            );
+            let mut vb = aws_sdk_ecs::types::Volume::builder().name(&vol.name);
+            if vol.configured_at_launch {
+                vb = vb.configured_at_launch(true);
+            }
+            if let Some(ref efs) = vol.efs {
+                let mut eb = aws_sdk_ecs::types::EfsVolumeConfiguration::builder()
+                    .file_system_id(&efs.file_system_id);
+                if let Some(ref rd) = efs.root_directory {
+                    eb = eb.root_directory(rd);
+                }
+                if let Some(ref te) = efs.transit_encryption {
+                    eb = eb.transit_encryption(te.as_str().into());
+                }
+                if efs.access_point_id.is_some() || efs.iam.is_some() {
+                    let mut ab = aws_sdk_ecs::types::EfsAuthorizationConfig::builder();
+                    if let Some(ref ap) = efs.access_point_id {
+                        ab = ab.access_point_id(ap);
+                    }
+                    if let Some(ref iam) = efs.iam {
+                        ab = ab.iam(iam.as_str().into());
+                    }
+                    eb = eb.authorization_config(ab.build());
+                }
+                vb = vb.efs_volume_configuration(eb.build()?);
+            }
+            task_def_req = task_def_req.volumes(vb.build());
         }
     }
 
@@ -963,14 +1201,18 @@ spec:
         init.entry_point.as_ref().unwrap(),
         &vec!["/bin/sh".to_string(), "-c".to_string()]
     );
-    assert_eq!(init.mount_points.get("/workspace").unwrap(), "workspace");
+    assert_eq!(
+        init.mount_points.get("/workspace").unwrap().source_volume(),
+        "workspace"
+    );
+    assert!(!init.mount_points.get("/workspace").unwrap().read_only());
 
     let app = &containers[1];
     assert_eq!(app.user.as_deref(), Some("1000"));
     assert!(app.readonly_root_filesystem);
     assert_eq!(app.depends_on.len(), 1);
     assert_eq!(app.depends_on[0].container_name, "init-perms");
-    assert_eq!(app.depends_on[0].condition, "SUCCESS");
+    assert_eq!(app.depends_on[0].condition, DependsOnCondition::Success);
     assert_eq!(
         app.linux_parameters.as_ref().unwrap().capabilities_drop,
         vec!["ALL".to_string()]
@@ -1184,6 +1426,168 @@ spec:
     );
 }
 
+#[test]
+fn test_unknown_condition_now_fails_at_parse_not_validate() {
+    // With condition typed as an enum, an unknown value is refused by serde
+    // before validate() ever runs. The error names the field and the bad
+    // value, which is what mattered about the old validate()-level check.
+    let yaml = sidecar_yaml_with(
+        "dependsOn:\n        - containerName: init-perms\n          condition: BOGUS",
+    );
+    let err = serde_yaml::from_str::<ServiceSpec>(&yaml)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("BOGUS"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_unknown_capability() {
+    let yaml = sidecar_yaml_with("linuxParameters:\n        capabilitiesDrop: [\"SYS_ADM\"]");
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("SYS_ADM"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_accepts_known_capabilities() {
+    let yaml =
+        sidecar_yaml_with("linuxParameters:\n        capabilitiesDrop: [\"ALL\", \"SYS_ADMIN\"]");
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn test_validate_detects_dependency_cycle() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: cyclic
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: a
+      image: a:latest
+      essential: true
+      dependsOn:
+        - containerName: b
+          condition: START
+    - name: b
+      image: b:latest
+      essential: false
+      dependsOn:
+        - containerName: a
+          condition: START
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("cycle"), "error was: {err}");
+    // The message should name the actual loop, not just assert one exists.
+    assert!(err.contains("a") && err.contains("b"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_accepts_diamond_dependency_without_cycle() {
+    // Two containers both waiting on the same init container is a DAG, not a
+    // cycle -- a naive "visited" check would wrongly reject this.
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: diamond
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  containers:
+    - name: init
+      image: init:latest
+      essential: false
+    - name: a
+      image: a:latest
+      essential: true
+      dependsOn:
+        - containerName: init
+          condition: SUCCESS
+    - name: b
+      image: b:latest
+      essential: true
+      dependsOn:
+        - containerName: init
+          condition: SUCCESS
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn test_mount_point_read_only_forms_parse() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: mounts
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: workspace
+    - name: config
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      mountPoints:
+        /workspace: workspace
+        /config:
+          sourceVolume: config
+          readOnly: true
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_ok());
+    let app = &spec.spec.containers.as_ref().unwrap()[0];
+    let ws = app.mount_points.get("/workspace").unwrap();
+    assert_eq!(ws.source_volume(), "workspace");
+    assert!(!ws.read_only(), "shorthand form must default to read-write");
+    let cfg = app.mount_points.get("/config").unwrap();
+    assert_eq!(cfg.source_volume(), "config");
+    assert!(cfg.read_only());
+}
+
+#[test]
+fn test_efs_volume_parses_and_validates() {
+    let yaml = r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: efs-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: shared
+      efs:
+        fileSystemId: fs-0123456789abcdef0
+        rootDirectory: /data
+        transitEncryption: ENABLED
+  containers:
+    - name: app
+      image: app:latest
+      essential: true
+      mountPoints:
+        /data: shared
+"#;
+    let spec: ServiceSpec = serde_yaml::from_str(yaml).unwrap();
+    assert!(spec.validate().is_ok());
+    let efs = spec.spec.volumes[0].efs.as_ref().unwrap();
+    assert_eq!(efs.file_system_id, "fs-0123456789abcdef0");
+    assert_eq!(efs.root_directory.as_deref(), Some("/data"));
+}
+
 #[cfg(test)]
 fn sidecar_yaml_with(extra_container_field: &str) -> String {
     format!(
@@ -1222,16 +1626,6 @@ fn test_validate_rejects_healthy_condition() {
     let err = spec.validate().unwrap_err().to_string();
     assert!(err.contains("HEALTHY"), "error was: {err}");
     assert!(err.contains("healthCheck"), "error was: {err}");
-}
-
-#[test]
-fn test_validate_rejects_unknown_condition() {
-    let yaml = sidecar_yaml_with(
-        "dependsOn:\n        - containerName: init-perms\n          condition: BOGUS",
-    );
-    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
-    let err = spec.validate().unwrap_err().to_string();
-    assert!(err.contains("BOGUS"), "error was: {err}");
 }
 
 #[test]
