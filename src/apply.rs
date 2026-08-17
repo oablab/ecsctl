@@ -61,11 +61,18 @@ pub struct ContainerSpec {
     #[serde(default)]
     pub readonly_root_filesystem: bool,
     /// Startup ordering: this container waits for the named one to reach
-    /// `condition` (START, SUCCESS, COMPLETE, or HEALTHY) before starting.
-    /// Without this, an init container that must run and exit before the app
-    /// container starts (e.g. chowning a shared volume so a non-root container
-    /// can write to it) has no way to express that ordering — ECS starts every
-    /// container in a task concurrently by default.
+    /// `condition` (START, SUCCESS, or COMPLETE) before starting. `HEALTHY` is
+    /// intentionally not accepted yet: it is a legal ECS value but requires a
+    /// `healthCheck` on the target container, which this spec cannot configure
+    /// — accepting it would parse and validate cleanly, then fail at
+    /// RegisterTaskDefinition with an AWS-worded error days after the YAML was
+    /// written. Rejecting it locally, with a clear reason, until healthCheck
+    /// support lands is better than shipping a value that cannot yet succeed.
+    ///
+    /// Without this field at all, an init container that must run and exit
+    /// before the app container starts (e.g. chowning a shared volume so a
+    /// non-root container can write to it) has no way to express that ordering
+    /// — ECS starts every container in a task concurrently by default.
     #[serde(default)]
     pub depends_on: Vec<DependsOn>,
     #[serde(default)]
@@ -208,6 +215,59 @@ impl ServiceSpec {
             anyhow::bail!("desiredCount must be >= 0");
         }
 
+        // Validate multi-container cross-references and dependsOn conditions
+        // locally, before anything is sent to AWS. Each of these previously
+        // parsed and validated cleanly, then failed at RegisterTaskDefinition
+        // with an AWS-worded error unrelated to the line that caused it.
+        if let Some(ref containers) = spec.containers {
+            let container_names: std::collections::HashSet<&str> =
+                containers.iter().map(|c| c.name.as_str()).collect();
+            let volume_names: std::collections::HashSet<&str> =
+                spec.volumes.iter().map(|v| v.name.as_str()).collect();
+
+            for cs in containers {
+                for dep in &cs.depends_on {
+                    match dep.condition.as_str() {
+                        "START" | "SUCCESS" | "COMPLETE" => {}
+                        "HEALTHY" => anyhow::bail!(
+                            "container '{}' dependsOn '{}' uses condition HEALTHY, which is not yet supported: it requires a healthCheck on '{}' that this spec has no way to configure, and would fail at RegisterTaskDefinition rather than here. Use START, SUCCESS, or COMPLETE instead",
+                            cs.name,
+                            dep.container_name,
+                            dep.container_name
+                        ),
+                        other => anyhow::bail!(
+                            "container '{}' dependsOn '{}' has invalid condition '{}': expected START, SUCCESS, or COMPLETE",
+                            cs.name,
+                            dep.container_name,
+                            other
+                        ),
+                    }
+                    if !container_names.contains(dep.container_name.as_str()) {
+                        anyhow::bail!(
+                            "container '{}' dependsOn references '{}', which is not defined in spec.containers",
+                            cs.name,
+                            dep.container_name
+                        );
+                    }
+                    if dep.container_name == cs.name {
+                        anyhow::bail!("container '{}' has a dependsOn on itself", cs.name);
+                    }
+                }
+
+                for (container_path, source_volume) in &cs.mount_points {
+                    if !volume_names.contains(source_volume.as_str()) {
+                        anyhow::bail!(
+                            "container '{}' mounts '{}' at '{}', but '{}' is not defined in spec.volumes",
+                            cs.name,
+                            source_volume,
+                            container_path,
+                            source_volume
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -290,9 +350,12 @@ fn build_container_def(
             "START" => aws_sdk_ecs::types::ContainerCondition::Start,
             "SUCCESS" => aws_sdk_ecs::types::ContainerCondition::Success,
             "COMPLETE" => aws_sdk_ecs::types::ContainerCondition::Complete,
-            "HEALTHY" => aws_sdk_ecs::types::ContainerCondition::Healthy,
+            // HEALTHY and anything else is rejected in ServiceSpec::validate()
+            // before this function runs on the apply path; this remains a
+            // defensive fallback for direct callers (tests) that bypass
+            // validate().
             other => anyhow::bail!(
-                "invalid dependsOn condition '{}' for container '{}': expected START, SUCCESS, COMPLETE, or HEALTHY",
+                "invalid dependsOn condition '{}' for container '{}': expected START, SUCCESS, or COMPLETE (HEALTHY is not yet supported)",
                 other,
                 cs.name
             ),
@@ -847,5 +910,89 @@ spec:
     .unwrap();
     assert!(spec.spec.containers.is_none());
     assert!(spec.spec.volumes.is_empty());
+    assert!(spec.validate().is_ok());
+}
+
+#[cfg(test)]
+fn sidecar_yaml_with(extra_container_field: &str) -> String {
+    format!(
+        r#"
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: sidecar-app
+  cluster: test-cluster
+spec:
+  cpu: "1024"
+  memory: "2048"
+  volumes:
+    - name: workspace
+  containers:
+    - name: init-perms
+      image: app:latest
+      essential: false
+      mountPoints:
+        /workspace: workspace
+    - name: app
+      image: app:latest
+      essential: true
+      {extra}
+"#,
+        extra = extra_container_field
+    )
+}
+
+#[test]
+fn test_validate_rejects_healthy_condition() {
+    let yaml = sidecar_yaml_with(
+        "dependsOn:\n        - containerName: init-perms\n          condition: HEALTHY",
+    );
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("HEALTHY"), "error was: {err}");
+    assert!(err.contains("healthCheck"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_unknown_condition() {
+    let yaml = sidecar_yaml_with(
+        "dependsOn:\n        - containerName: init-perms\n          condition: BOGUS",
+    );
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    assert!(spec.validate().is_err());
+}
+
+#[test]
+fn test_validate_rejects_depends_on_unknown_container() {
+    let yaml = sidecar_yaml_with(
+        "dependsOn:\n        - containerName: does-not-exist\n          condition: SUCCESS",
+    );
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("does-not-exist"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_rejects_depends_on_self() {
+    let yaml =
+        sidecar_yaml_with("dependsOn:\n        - containerName: app\n          condition: SUCCESS");
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    assert!(spec.validate().is_err());
+}
+
+#[test]
+fn test_validate_rejects_mount_point_unknown_volume() {
+    let yaml = sidecar_yaml_with("mountPoints:\n        /data: not-a-real-volume");
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("not-a-real-volume"), "error was: {err}");
+}
+
+#[test]
+fn test_validate_accepts_valid_depends_on_and_mount_points() {
+    let yaml = sidecar_yaml_with(
+        "dependsOn:\n        - containerName: init-perms\n          condition: SUCCESS\n      mountPoints:\n        /workspace: workspace",
+    );
+    let spec: ServiceSpec = serde_yaml::from_str(&yaml).unwrap();
     assert!(spec.validate().is_ok());
 }

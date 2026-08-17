@@ -148,14 +148,14 @@
               "readonlyRootFilesystem": { "type": "boolean", "default": false },
               "dependsOn": {
                 "type": "array",
-                "description": "Startup ordering against other containers in this task",
+                "description": "Startup ordering against other containers in this task. HEALTHY is not yet supported (requires healthCheck, which this schema has no way to configure) and is rejected at validation time.",
                 "items": {
                   "type": "object",
                   "required": ["containerName", "condition"],
                   "additionalProperties": false,
                   "properties": {
                     "containerName": { "type": "string" },
-                    "condition": { "type": "string", "enum": ["START", "SUCCESS", "COMPLETE", "HEALTHY"] }
+                    "condition": { "type": "string", "enum": ["START", "SUCCESS", "COMPLETE"] }
                   }
                 }
               },
