@@ -176,25 +176,25 @@ pub struct ContainerSpec {
     pub image: String,
     #[serde(default = "default_essential")]
     pub essential: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_port")]
     pub port: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_point: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secrets: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_group: Option<String>,
     /// Container-level user override (e.g. "0" for root, "1000" for a fixed uid).
     /// Sidecars that need root for one-shot setup (chown, tailscaled) while the
     /// app container stays non-root need this per-container, not just at the task
     /// level, which ECS does not support anyway (there is no task-level "user").
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub readonly_root_filesystem: bool,
     /// Startup ordering: this container waits for the named one to reach
     /// `condition` (START, SUCCESS, or COMPLETE) before starting. `HEALTHY`
@@ -204,15 +204,15 @@ pub struct ContainerSpec {
     /// before the app container starts (e.g. chowning a shared volume so a
     /// non-root container can write to it) has no way to express that ordering
     /// — ECS starts every container in a task concurrently by default.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<DependsOn>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linux_parameters: Option<LinuxParameters>,
     /// Shared-volume mount points, keyed by container path. Keying by path
     /// rather than using a list makes a duplicate mount path unrepresentable,
     /// and BTreeMap keeps the registered task definition's mount order stable
     /// across runs for the same spec.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub mount_points: std::collections::BTreeMap<String, MountPointSpec>,
 }
 
@@ -279,7 +279,11 @@ pub struct VolumeSpec {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Spec {
-    #[serde(default)]
+    // skip_serializing_if throughout the flat container fields: in
+    // multi-container mode they are unused, and apply refuses a spec that sets
+    // them alongside containers[], so serialising defaults made export emit a
+    // document its own apply rejected.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub image: String,
     pub cpu: String,
     pub memory: String,
@@ -291,22 +295,24 @@ pub struct Spec {
     pub desired_count: i32,
     #[serde(default)]
     pub exec_enabled: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secrets: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_role_arn: Option<String>,
     pub task_role_arn: Option<String>,
     pub subnets: Option<Vec<String>>,
     pub security_groups: Option<Vec<String>>,
     #[serde(default)]
     pub assign_public_ip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
-    #[serde(default = "default_port")]
+    #[serde(default = "default_port", skip_serializing_if = "is_zero_port")]
     pub port: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub containers: Option<Vec<ContainerSpec>>,
@@ -696,6 +702,12 @@ fn default_count() -> i32 {
 }
 fn default_port() -> u16 {
     0
+}
+fn is_zero_port(p: &u16) -> bool {
+    *p == 0
+}
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn set_yaml_field(root: &mut serde_yaml::Value, path: &str, value: &str) -> Result<()> {

@@ -600,7 +600,15 @@ async fn build_spec(
             subnets: Some(subnets),
             security_groups: Some(security_groups),
             assign_public_ip,
-            container_name: Some(container_name),
+            // In multi-container mode the flat container fields are not used,
+            // and apply now refuses a spec that sets them alongside
+            // containers[] -- so emitting the hardcoded default here made
+            // export produce a spec its own apply rejected.
+            container_name: if containers.is_some() {
+                None
+            } else {
+                Some(container_name)
+            },
             port,
             command,
             containers,
